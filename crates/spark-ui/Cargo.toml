@@ -18,7 +18,7 @@ spark-protocol.workspace = true
 console_error_panic_hook = "0.1"
 web-sys = { version = "0.3", features = [
   "Window", "Document", "Element", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement",
-  "HtmlSelectElement", "HtmlMediaElement", "HtmlVideoElement", "Node", "NodeList", "Event", "EventTarget",
+  "HtmlAudioElement", "HtmlSelectElement", "HtmlMediaElement", "HtmlVideoElement", "Node", "NodeList", "Event", "EventTarget",
   "KeyboardEvent", "MessageEvent", "CloseEvent", "ErrorEvent", "MouseEvent", "Location",
   "Request", "RequestInit", "RequestMode", "Response", "Headers", "WebSocket", "BinaryType",
   "File", "FileList", "Blob", "XmlHttpRequest", "XmlHttpRequestUpload", "XmlHttpRequestEventTarget",

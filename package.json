@@ -1,6 +1,6 @@
 {
   "name": "spark-lan",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Spark — локальные чаты, звонки и файлы",
   "private": true,
   "author": "EugeneHeisst",
@@ -27,18 +27,42 @@
     "productName": "Spark",
     "copyright": "Copyright © 2026 EugeneHeisst",
     "asar": true,
-    "directories": { "output": "dist" },
-    "files": ["desktop/main.cjs", "desktop/preload.cjs", "package.json"],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "desktop/main.cjs",
+      "desktop/preload.cjs",
+      "package.json"
+    ],
     "extraResources": [
-      { "from": "desktop/binaries", "to": "bin", "filter": ["spark-service", "spark-service.exe"] },
-      { "from": "assets", "to": "ui", "filter": ["**/*"] }
+      {
+        "from": "desktop/binaries",
+        "to": "bin",
+        "filter": [
+          "spark-service",
+          "spark-service.exe"
+        ]
+      },
+      {
+        "from": "assets",
+        "to": "ui",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "linux": {
       "syncDesktopName": true,
       "category": "Network;InstantMessaging;",
       "icon": "assets/icon.png",
       "artifactName": "Spark-${version}-linux-${arch}.${ext}",
-      "desktop": { "entry": { "Name": "Spark", "Comment": "Чаты и звонки в локальной сети" } }
+      "desktop": {
+        "entry": {
+          "Name": "Spark",
+          "Comment": "Чаты и звонки в локальной сети"
+        }
+      }
     },
     "win": {
       "icon": "assets/icon.ico",

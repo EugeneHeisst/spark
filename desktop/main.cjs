@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, Menu, dialog, desktopCapturer, ipcMain, session } = require('electron');
+const { app, BrowserWindow, Menu, dialog, desktopCapturer, ipcMain, session, Tray, nativeImage } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -20,6 +20,38 @@ app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
 let child;
 let mainWindow;
 let boot;
+let tray;
+let preferences;
+const defaults = { theme: 'dark', accent: '#ffb251', zoom: 100, sounds: true, volume: 55, close_to_tray: true, compact: false };
+function normalizePreferences(input) {
+  const p = input || {};
+  return { theme: ['dark', 'light', 'midnight'].includes(p.theme) ? p.theme : defaults.theme,
+    accent: /^#[0-9a-f]{6}$/i.test(p.accent) ? p.accent : defaults.accent,
+    zoom: Number.isInteger(p.zoom) ? Math.min(150, Math.max(75, p.zoom)) : defaults.zoom,
+    sounds: typeof p.sounds === 'boolean' ? p.sounds : defaults.sounds,
+    volume: Number.isInteger(p.volume) ? Math.min(100, Math.max(0, p.volume)) : defaults.volume,
+    close_to_tray: typeof p.close_to_tray === 'boolean' ? p.close_to_tray : defaults.close_to_tray,
+    compact: typeof p.compact === 'boolean' ? p.compact : defaults.compact };
+}
+function showWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+function createTray(assets) {
+  try {
+    tray = new Tray(nativeImage.createFromPath(path.join(assets, 'icon.png')).resize({ width: 24, height: 24 }));
+    tray.setToolTip('Spark — чаты и звонки');
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: 'Открыть Spark', click: showWindow },
+      { type: 'separator' },
+      { label: 'Выйти из Spark', click: () => app.quit() },
+    ]));
+    tray.on('click', showWindow);
+    tray.on('double-click', showWindow);
+  } catch (error) { console.error('Spark tray:', error.message); }
+}
 let quitting = false;
 const sourcesByContents = new Map();
 const approvedSources = new Map();
@@ -97,7 +129,7 @@ function startService() {
 
 function installPermissions() {
   const ses = session.defaultSession;
-  const permitted = permission => ['media', 'display-capture', 'speaker-selection'].includes(permission);
+  const permitted = permission => ['media', 'display-capture', 'speaker-selection', 'fullscreen'].includes(permission);
   ses.setPermissionCheckHandler((contents, permission, origin) =>
     !!contents && trustedUrl(contents.getURL()) && trustedUrl(origin) && permitted(permission));
   ses.setPermissionRequestHandler((contents, permission, callback, details) => {
@@ -115,6 +147,19 @@ function installPermissions() {
 }
 
 function installIpc() {
+  ipcMain.handle('spark:get-settings', event => { trustedIpc(event); return preferences; });
+  ipcMain.handle('spark:set-settings', (event, input) => {
+    trustedIpc(event);
+    const next = normalizePreferences(input);
+    const destination = path.join(app.getPath('userData'), 'preferences.json');
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination + '.tmp', JSON.stringify(next), { mode: 0o600 });
+    fs.renameSync(destination + '.tmp', destination);
+    preferences = next;
+    mainWindow.webContents.setZoomFactor(next.zoom / 100);
+    return next;
+  });
+  ipcMain.handle('spark:quit', event => { trustedIpc(event); app.quit(); });
   ipcMain.handle('spark:version', event => { trustedIpc(event); return app.getVersion(); });
   ipcMain.handle('spark:sources', async event => {
     trustedIpc(event);
@@ -168,11 +213,13 @@ function installIpc() {
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => {
-    if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); }
+    showWindow();
   });
   app.whenReady().then(async () => {
     try {
       Menu.setApplicationMenu(null);
+      try { preferences = normalizePreferences(JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'preferences.json'), 'utf8'))); }
+      catch { preferences = { ...defaults }; }
       boot = await startService();
       if (quitting) return;
       installPermissions();
@@ -182,6 +229,11 @@ else {
         title: 'Spark', backgroundColor: '#111318', icon: path.join(assets, 'icon.png'), show: false,
         webPreferences: { preload: path.join(__dirname, 'preload.cjs'), nodeIntegration: false,
           contextIsolation: true, sandbox: true, spellcheck: false, backgroundThrottling: false } });
+      createTray(assets);
+      mainWindow.on('close', event => {
+        if (!quitting && tray && preferences.close_to_tray) { event.preventDefault(); mainWindow.hide(); }
+      });
+      mainWindow.webContents.on('did-finish-load', () => mainWindow.webContents.setZoomFactor(preferences.zoom / 100));
       mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       mainWindow.webContents.on('will-navigate', (event, url) => { if (!trustedUrl(url)) event.preventDefault(); });
       mainWindow.once('ready-to-show', () => mainWindow.show());
@@ -193,9 +245,12 @@ else {
     }
   });
 }
+app.on('activate', showWindow);
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', () => {
   quitting = true;
+  tray?.destroy();
+  tray = undefined;
   if (child && child.exitCode === null) child.kill(process.platform === 'win32' ? undefined : 'SIGINT');
 });
 process.on('SIGTERM', () => app.quit());

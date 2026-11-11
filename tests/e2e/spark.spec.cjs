@@ -75,6 +75,193 @@ async function captureEnded(page, kind) {
   await expect.poll(() => page.evaluate(kind => window.sparkTestTracks[kind].readyState, kind)).toBe('ended');
 }
 
+async function setPreference(page, field, value) {
+  // Color/range inputs use the same bubbling input event as a real picker/slider.
+  await id(page, field).evaluate((input, value) => {
+    input.value = String(value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }, value);
+}
+
+async function observeEventAudio(page) {
+  await page.evaluate(() => {
+    const originalPlay = HTMLMediaElement.prototype.play;
+    window.sparkTestSounds = [];
+    // Observe the original browser decoder/playback, without replacing it with
+    // a resolved promise or a fake audio object.
+    HTMLMediaElement.prototype.play = function (...args) {
+      const name = new URL(this.src || location.href).pathname.match(/^\/sounds\/([^/]+)\.wav$/)?.[1];
+      if (!name) return originalPlay.apply(this, args);
+      const record = { name, volume: this.volume, started: false, ended: false, error: null };
+      window.sparkTestSounds.push(record);
+      this.addEventListener('ended', () => {
+        record.ended = true;
+        record.duration = this.duration;
+        record.time = this.currentTime;
+      }, { once: true });
+      const result = originalPlay.apply(this, args);
+      result.then(() => { record.started = true; }, error => { record.error = error.message; });
+      return result;
+    };
+  });
+}
+
+async function assertPlayedCue(page, name) {
+  await expect.poll(() => page.evaluate(name =>
+    window.sparkTestSounds.some(sound => sound.name === name && sound.started && !sound.error), name)).toBe(true);
+}
+
+async function assertFullscreenVideo(page, peer, kind, info, close = 'escape') {
+  await page.evaluate(({ peer, kind }) => {
+    window.sparkTestViewerTrack = document.querySelector(`[data-testid="video-${peer}-${kind}"]`).srcObject.getVideoTracks()[0];
+  }, { peer, kind });
+  await id(page, `expand-${peer}-${kind}`).click();
+  const expanded = id(page, 'expanded-video');
+  await expect(expanded).toBeVisible();
+  await expect.poll(() => expanded.evaluate(v => v.videoWidth > 0 && v.currentTime > 0.1)).toBe(true);
+  await id(page, 'fullscreen-video').click();
+  await expect.poll(() => page.evaluate(() => !!document.fullscreenElement)).toBe(true);
+  await expect.poll(() => expanded.evaluate(video => {
+    const bounds = video.getBoundingClientRect();
+    return bounds.width >= innerWidth - 30 && bounds.height >= innerHeight - 90;
+  })).toBe(true);
+  await page.screenshot({ path: info.outputPath(`fullscreen-${kind}.png`) });
+  if (close === 'button') await page.locator('.modal-close').click();
+  else await page.keyboard.press('Escape');
+  await expect.poll(() => page.evaluate(() => !!document.fullscreenElement)).toBe(false);
+  // Chromium can consume the first Escape to leave native fullscreen before
+  // forwarding a later Escape to the viewer itself.
+  if (await expanded.count()) await page.keyboard.press('Escape');
+  await expect(expanded).toHaveCount(0);
+  expect(await page.evaluate(({ peer, kind }) => {
+    const track = document.querySelector(`[data-testid="video-${peer}-${kind}"]`).srcObject.getVideoTracks()[0];
+    return track === window.sparkTestViewerTrack && track.readyState === 'live';
+  }, { peer, kind })).toBe(true);
+}
+
+test('preferences: themes, accent, native zoom, event audio, durable settings and explicit quit', async ({}, info) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'spark-preferences-'));
+  const directory = path.join(temporary, 'client');
+  const errors = [];
+  let client;
+  try {
+    client = await launch(directory, path.join(temporary, 'saved'), errors);
+    let { app, page } = client;
+    // Synthetic tests still decode/play real media, with Chromium output muted.
+    expect(await app.evaluate(({ app }) => app.commandLine.hasSwitch('mute-audio'))).toBe(true);
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    await id(page, 'settings').click();
+    await id(page, 'pref-theme').selectOption('light');
+    await expect(page.locator('body')).toHaveCSS('background-color', 'rgb(244, 245, 248)');
+    await id(page, 'pref-theme').selectOption('midnight');
+    await expect(page.locator('body')).toHaveCSS('background-color', 'rgb(9, 14, 25)');
+    await setPreference(page, 'pref-accent', '#5ca9ff');
+    await expect(page.locator('.onboarding .brand-mark')).toHaveCSS('background-color', 'rgb(92, 169, 255)');
+    await setPreference(page, 'pref-zoom', 125);
+    await expect(page.locator('#zoom-label')).toHaveText('125%');
+    await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.getZoomFactor())).toBe(1.25);
+    await page.keyboard.press('Control+-');
+    await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.getZoomFactor())).toBe(1.2);
+    await page.keyboard.press('Control+0');
+    await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.getZoomFactor())).toBe(1);
+    await setPreference(page, 'pref-zoom', 125);
+    await id(page, 'pref-compact').check();
+    await setPreference(page, 'pref-volume', 35);
+
+    const cues = ['connect', 'disconnect', 'notification', 'invite', 'mic-on', 'mic-off', 'sound-on', 'sound-off'];
+    const decoded = await page.evaluate(async cues => {
+      const context = new AudioContext();
+      try {
+        return await Promise.all(cues.map(async name => {
+          const response = await fetch(`/sounds/${name}.wav`);
+          if (!response.ok) throw new Error(`${name}: HTTP ${response.status}`);
+          const bytes = await response.arrayBuffer();
+          const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+            .map(value => value.toString(16).padStart(2, '0')).join('');
+          const audio = await context.decodeAudioData(bytes);
+          return { name, hash, duration: audio.duration, channels: audio.numberOfChannels,
+            peak: Math.max(...audio.getChannelData(0).map(Math.abs)) };
+        }));
+      } finally { await context.close(); }
+    }, cues);
+    expect(new Set(decoded.map(audio => audio.hash)).size).toBe(cues.length);
+    for (const audio of decoded) {
+      expect(audio.duration).toBeGreaterThan(0.05);
+      expect(audio.duration).toBeLessThan(3);
+      expect(audio.channels).toBeGreaterThan(0);
+      expect(audio.peak).toBeGreaterThan(0.01);
+    }
+    await fs.writeFile(info.outputPath('decoded-event-audio.json'), JSON.stringify(decoded, null, 2));
+    await observeEventAudio(page);
+    for (const cue of cues) await page.locator(`[data-action="preview-sound"][data-id="${cue}"]`).click();
+    await expect.poll(() => page.evaluate(() => window.sparkTestSounds.filter(sound => sound.started && sound.ended).length)).toBe(cues.length);
+    const played = await page.evaluate(() => window.sparkTestSounds);
+    expect(played.map(sound => sound.name)).toEqual(cues);
+    for (const sound of played) {
+      expect(sound.volume).toBeCloseTo(0.35);
+      expect(sound.error).toBeNull();
+      expect(sound.duration).toBeGreaterThan(0.05);
+      expect(sound.time).toBeGreaterThan(0.05);
+    }
+    await id(page, 'pref-sounds').uncheck();
+    for (const cue of cues) await page.locator(`[data-action="preview-sound"][data-id="${cue}"]`).click();
+    expect(await page.evaluate(() => window.sparkTestSounds.length)).toBe(cues.length);
+    await id(page, 'pref-sounds').check();
+    await setPreference(page, 'pref-volume', 0);
+    await page.locator('[data-action="preview-sound"][data-id="notification"]').click();
+    expect(await page.evaluate(() => window.sparkTestSounds.length)).toBe(cues.length);
+    await setPreference(page, 'pref-volume', 35);
+    await id(page, 'pref-sounds').uncheck();
+    await id(page, 'pref-tray').uncheck();
+    const saved = { theme: 'midnight', accent: '#5ca9ff', zoom: 125, sounds: false,
+      volume: 35, close_to_tray: false, compact: true };
+    await expect.poll(async () => {
+      try { return JSON.parse(await fs.readFile(path.join(directory, 'preferences.json'), 'utf8')); }
+      catch { return null; }
+    }).toEqual(saved);
+    expect(await page.evaluate(() => window.sparkDesktop.getSettings())).toEqual(saved);
+    await page.screenshot({ path: info.outputPath('personalized-settings.png') });
+
+    // Disabling the tray makes the native close action really quit.
+    const closed = app.waitForEvent('close');
+    await app.evaluate(({ BrowserWindow }) => { setImmediate(() => BrowserWindow.getAllWindows()[0].close()); });
+    await closed;
+    client = undefined;
+    client = await launch(directory, path.join(temporary, 'saved'), errors);
+    ({ app, page } = client);
+    expect(await page.evaluate(() => window.sparkDesktop.getSettings())).toEqual(saved);
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'midnight');
+    await expect(page.locator('html')).toHaveAttribute('data-compact', 'true');
+    await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.getZoomFactor())).toBe(1.25);
+    await id(page, 'settings').click();
+    await expect(id(page, 'pref-theme')).toHaveValue('midnight');
+    await expect(id(page, 'pref-accent')).toHaveValue('#5ca9ff');
+    await expect(id(page, 'pref-zoom')).toHaveValue('125');
+    await expect(id(page, 'pref-volume')).toHaveValue('35');
+    await expect(id(page, 'pref-sounds')).not.toBeChecked();
+    await expect(id(page, 'pref-tray')).not.toBeChecked();
+    await expect(id(page, 'pref-compact')).toBeChecked();
+    await id(page, 'settings-name').fill('Новое имя из настроек');
+    await id(page, 'save-settings').click();
+    await expect(id(page, 'display-name')).toHaveValue('Новое имя из настроек');
+    await connect(page, 'Новое имя из настроек', true);
+    await send(page, 'Компактное сообщение после перезапуска');
+    await expect(page.locator('#message-list .message').last()).toHaveCSS('padding-top', '5px');
+    await id(page, 'settings').click();
+    await id(page, 'pref-tray').check();
+    await expect.poll(() => page.evaluate(() => window.sparkDesktop.getSettings())).toMatchObject({ close_to_tray: true });
+    const quit = app.waitForEvent('close');
+    await id(page, 'quit-app').click();
+    await quit;
+    client = undefined;
+    expect(errors).toEqual([]);
+  } finally {
+    await client?.app.close().catch(() => {});
+    await fs.writeFile(info.outputPath('renderer-errors.json'), JSON.stringify(errors, null, 2));
+    await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
 test('two independent desktops: chat, files, actual RTP/video/screen, reconnect and durable history', async ({}, info) => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'spark-e2e-'));
   const clients = [];
@@ -83,6 +270,7 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
   try {
     a = await launch(path.join(temporary, 'alice'), path.join(temporary, 'saved-alice'), errors); clients.push(a.app);
     b = await launch(path.join(temporary, 'bob'), path.join(temporary, 'saved-bob'), errors); clients.push(b.app);
+    await observeEventAudio(a.page); await observeEventAudio(b.page);
     await a.page.screenshot({ path: info.outputPath('01-onboarding.png') });
     await connect(a.page, 'Алиса', true);
     await id(b.page, 'refresh-discovery').click();
@@ -94,9 +282,11 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
     await connect(b.page, 'Борис', false);
     await expect(a.page.locator('#members .member')).toHaveCount(2);
     await expect(b.page.locator('#members .member')).toHaveCount(2);
+    await assertPlayedCue(a.page, 'connect'); await assertPlayedCue(b.page, 'connect');
 
     await send(a.page, 'Привет из первого процесса! <script>это просто текст</script>');
     await expect(b.page.locator('#message-list')).toContainText('Привет из первого процесса!');
+    await assertPlayedCue(b.page, 'notification');
     await expect(b.page.locator('#message-list script')).toHaveCount(0);
     await send(b.page, 'Ответ по настоящему WebSocket');
     await expect(a.page.locator('#message-list')).toContainText('Ответ по настоящему WebSocket');
@@ -128,6 +318,7 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
     const bobId = await b.page.evaluate(async () => (await (await fetch('/api/bootstrap')).json()).profile.id);
     await id(a.page, `invite-${bobId}`).click();
     await expect(id(b.page, 'accept-invite')).toBeVisible();
+    await assertPlayedCue(b.page, 'invite');
     expect((await snapshot(b.page))?.channelId ?? null).toBeNull();
     await id(b.page, 'accept-invite').click();
     await expect.poll(async () => (await snapshot(b.page))?.channelId).toBe('lounge');
@@ -137,13 +328,17 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
     await expect.poll(async () => inbound(await stats(b.page), 'audio')).toBeGreaterThan(first + 200);
     await id(a.page, 'mute').click();
     await expect.poll(async () => (await snapshot(a.page)).localTracks.find(t => t.kind === 'audio')?.enabled).toBe(false);
+    await assertPlayedCue(a.page, 'mic-off');
     await id(a.page, 'mute').click();
     await expect.poll(async () => (await snapshot(a.page)).localTracks.find(t => t.kind === 'audio')?.enabled).toBe(true);
+    await assertPlayedCue(a.page, 'mic-on');
     await id(b.page, 'deafen').click();
     await expect.poll(async () => (await snapshot(b.page)).deafened).toBe(true);
+    await assertPlayedCue(b.page, 'sound-off');
     await expect.poll(() => b.page.locator('audio').evaluateAll(els => els.length > 0 && els.every(e => e.srcObject?.getAudioTracks().every(t => !t.enabled)))).toBe(true);
     await id(b.page, 'deafen').click();
     await expect.poll(() => b.page.locator('audio').evaluateAll(els => els.length > 0 && els.every(e => e.srcObject?.getAudioTracks().every(t => t.enabled)))).toBe(true);
+    await assertPlayedCue(b.page, 'sound-on');
 
     await id(a.page, 'camera').click();
     await assertRemoteVideo(b.page, aliceId, 'camera');
@@ -151,6 +346,9 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
     await assertRemoteVideo(a.page, bobId, 'camera');
     await retainCapture(a.page, 'camera');
     await retainCapture(b.page, 'camera');
+    await assertFullscreenVideo(b.page, aliceId, 'camera', info, 'button');
+    expect(await a.page.evaluate(() => window.sparkTestTracks.camera.readyState)).toBe('live');
+    expect(await b.page.evaluate(() => window.sparkTestTracks.camera.readyState)).toBe('live');
     await expect.poll(async () => (await stats(b.page)).flatMap(p => p.reports)
       .filter(r => r.type === 'inbound-rtp' && r.kind === 'video').reduce((s, r) => s + (r.framesDecoded || 0), 0)).toBeGreaterThan(3);
     await b.page.screenshot({ path: info.outputPath('03-video-call.png') });
@@ -175,14 +373,7 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
       await windowChoice.click();
       const screen = await assertRemoteVideo(b.page, aliceId, 'screen');
       await retainCapture(a.page, 'screen');
-      await id(b.page, `expand-${aliceId}-screen`).click();
-      const expanded = id(b.page, 'expanded-video');
-      await expect(expanded).toBeVisible();
-      await expect.poll(() => expanded.evaluate(v => v.videoWidth > 0 && v.currentTime > 0.1)).toBe(true);
-      expect((await expanded.boundingBox()).height).toBeGreaterThan(350);
-      await b.page.screenshot({ path: info.outputPath('04-expanded-screen.png') });
-      await b.page.keyboard.press('Escape');
-      await expect(expanded).toHaveCount(0);
+      await assertFullscreenVideo(b.page, aliceId, 'screen', info);
       expect(await a.page.evaluate(() => window.sparkTestTracks.screen.readyState)).toBe('live');
       // Decode actual received pixels: count the target's specific green,
       // distinct from the fake camera's pure-green test pattern and black tiles.
@@ -198,6 +389,32 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
       })).toBe(true);
       await expect(id(b.page, `video-${aliceId}-camera`)).toBeVisible();
       await b.page.screenshot({ path: info.outputPath('04-real-screen-and-camera.png') });
+    }
+
+    // Native close hides the host window; its existing renderer, Rust gateway,
+    // room, original capture tracks and actual RTP must continue in the tray.
+    const nativeWindow = await a.app.browserWindow(a.page);
+    const beforeTray = await nativeWindow.evaluate(window => ({ id: window.id, contents: window.webContents.id,
+      renderer: window.webContents.getOSProcessId(), url: window.webContents.getURL() }));
+    const tracksBeforeTray = (await snapshot(a.page)).localTracks.map(track => track.id).sort();
+    const audioBeforeTray = inbound(await stats(a.page), 'audio');
+    await nativeWindow.evaluate(window => window.close());
+    await expect.poll(() => nativeWindow.evaluate(window => window.isVisible())).toBe(false);
+    expect(a.app.windows()).toHaveLength(process.env.SPARK_SKIP_SCREEN_TEST === '1' ? 1 : 2);
+    expect(await nativeWindow.evaluate(window => window.isDestroyed())).toBe(false);
+    expect(await a.page.evaluate(async () => (await fetch('/api/bootstrap')).ok)).toBe(true);
+    await send(b.page, 'Создатель в трее, комната продолжает работать');
+    await expect(a.page.locator('#message-list')).toContainText('Создатель в трее, комната продолжает работать');
+    await expect.poll(async () => inbound(await stats(a.page), 'audio')).toBeGreaterThan(audioBeforeTray + 200);
+    expect((await snapshot(a.page)).localTracks.map(track => track.id).sort()).toEqual(tracksBeforeTray);
+    expect(await a.page.evaluate(() => Object.values(window.sparkTestTracks).every(track => track.readyState === 'live'))).toBe(true);
+    await a.app.evaluate(({ app }) => { app.emit('second-instance'); });
+    await expect.poll(() => nativeWindow.evaluate(window => window.isVisible())).toBe(true);
+    expect(await nativeWindow.evaluate(window => ({ id: window.id, contents: window.webContents.id,
+      renderer: window.webContents.getOSProcessId(), url: window.webContents.getURL() }))).toEqual(beforeTray);
+    await expect(a.page.locator('#members .member')).toHaveCount(2);
+    await a.page.screenshot({ path: info.outputPath('restored-from-tray.png') });
+    if (process.env.SPARK_SKIP_SCREEN_TEST !== '1') {
       await id(a.page, 'screen').click();
       await captureEnded(a.page, 'screen');
       await expect(id(b.page, `video-${aliceId}-screen`)).toHaveCount(0);
@@ -213,6 +430,7 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
     const audioBeforeRestart = inbound(await stats(b.page), 'audio');
     await expect.poll(async () => inbound(await stats(b.page), 'audio')).toBeGreaterThan(audioBeforeRestart + 200);
     await id(a.page, 'leave-voice').click();
+    await assertPlayedCue(a.page, 'disconnect');
     await captureEnded(a.page, 'camera');
     await expect.poll(async () => (await snapshot(a.page)).localTracks.length).toBe(0);
     await expect.poll(async () => (await snapshot(b.page)).peers.length).toBe(0);

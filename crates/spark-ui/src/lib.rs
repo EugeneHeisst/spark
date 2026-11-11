@@ -1,5 +1,6 @@
 //! Spark's local-first desktop interface. All application and media logic is Rust.
 mod media;
+mod preferences;
 
 use js_sys::{Function, Promise, Reflect};
 use leptos::prelude::*;
@@ -47,6 +48,7 @@ struct Invite {
 }
 #[derive(Default)]
 struct App {
+    preferences: preferences::Preferences,
     token: String,
     profile: Option<Profile>,
     version: String,
@@ -79,6 +81,7 @@ struct App {
     upload: Option<Upload>,
     upload_request: Option<UploadRequest>,
     history_busy: bool,
+    cue_audio: HashMap<String, web_sys::HtmlAudioElement>,
 }
 
 fn window() -> web_sys::Window {
@@ -211,6 +214,9 @@ pub fn start() {
     );
     let a = app.clone();
     spawn_local(async move {
+        let prefs = preferences::load().await;
+        preferences::apply(&prefs);
+        a.borrow_mut().preferences = prefs;
         match api::<Bootstrap>("", "GET", "/api/bootstrap", None).await {
             Ok(b) => {
                 {
@@ -261,7 +267,7 @@ fn render_onboarding(app: &AppRef) {
     let s = app.borrow();
     let host = s.form.mode == "host";
     let content = format!(
-        r#"<div class="onboarding"><div class="onboard-info"><div class="brand-lockup"><div class="brand-mark">ϟ</div><span>Spark<span class="wordmark-dot">.</span></span></div><div class="eyebrow"><span class="status-dot"></span> ВАША СЕТЬ. ВАШЕ ПРОСТРАНСТВО.</div><h1>Ближе,<br/>чем кажется<span>.</span></h1><p class="lead">Всё, что нужно для общения.<br/>Прямо в вашей локальной сети.</p><div class="feature-pills"><span>◉ Голос и видео</span><span>▱ Общий экран</span><span>↗ Файлы</span></div><div class="local-note"><span>⌁</span><p><strong>Без облака и регистрации</strong><br/>Один компьютер создаёт комнату.<br/>Остальные подключаются по локальной сети.</p></div><footer>Spark <span>v{version} · Linux / Windows</span></footer></div><section class="onboard-card"><div class="card-heading"><span class="eyebrow">НАЧНЁМ ОБЩЕНИЕ</span><h2>Ваше место в сети</h2><p>Укажите имя и подключитесь к своей команде.</p></div><label class="field">Как вас называть<input id="display-name" data-field="name" data-testid="display-name" autocomplete="nickname" maxlength="64" value="{name}" placeholder="Ваше имя"/></label><div class="tabs"><button class="{join_class}" data-action="mode-join" data-testid="join-tab">Подключиться</button><button class="{host_class}" data-action="mode-host" data-testid="host-tab">Создать комнату</button></div>{fields}<label class="field">Код комнаты<input id="room-code" data-field="code" data-testid="room-code" type="password" minlength="6" maxlength="128" value="{code}" placeholder="Не менее 6 символов" autocomplete="off"/></label><p class="field-help">{help}</p><button class="primary wide" data-action="connect" data-testid="connect" {disabled}>{button}<span>→</span></button>{discovery}<p class="trust-note">Чаты и файлы проходят через создателя комнаты.<br/>Используйте Spark в доверенной локальной сети.</p></section></div><div id="overlay"></div>"#,
+        r#"<div class="onboarding"><div class="onboard-info"><div class="brand-lockup"><div class="brand-mark">ϟ</div><span>Spark<span class="wordmark-dot">.</span></span></div><div class="eyebrow"><span class="status-dot"></span> ВАША СЕТЬ. ВАШЕ ПРОСТРАНСТВО.</div><h1>Ближе,<br/>чем кажется<span>.</span></h1><p class="lead">Всё, что нужно для общения.<br/>Прямо в вашей локальной сети.</p><div class="feature-pills"><span>◉ Голос и видео</span><span>▱ Общий экран</span><span>↗ Файлы</span></div><div class="local-note"><span>⌁</span><p><strong>Без облака и регистрации</strong><br/>Один компьютер создаёт комнату.<br/>Остальные подключаются по локальной сети.</p></div><button class="onboard-settings" data-action="settings" data-testid="settings">⚙ Настройки</button><footer>Spark <span>v{version} · Linux / Windows</span></footer></div><section class="onboard-card"><div class="card-heading"><span class="eyebrow">НАЧНЁМ ОБЩЕНИЕ</span><h2>Ваше место в сети</h2><p>Укажите имя и подключитесь к своей команде.</p></div><label class="field">Как вас называть<input id="display-name" data-field="name" data-testid="display-name" autocomplete="nickname" maxlength="64" value="{name}" placeholder="Ваше имя"/></label><div class="tabs"><button class="{join_class}" data-action="mode-join" data-testid="join-tab">Подключиться</button><button class="{host_class}" data-action="mode-host" data-testid="host-tab">Создать комнату</button></div>{fields}<label class="field">Код комнаты<input id="room-code" data-field="code" data-testid="room-code" type="password" minlength="6" maxlength="128" value="{code}" placeholder="Не менее 6 символов" autocomplete="off"/></label><p class="field-help">{help}</p><button class="primary wide" data-action="connect" data-testid="connect" {disabled}>{button}<span>→</span></button>{discovery}<p class="trust-note">Чаты и файлы проходят через создателя комнаты.<br/>Используйте Spark в доверенной локальной сети.</p></section></div><div id="overlay"></div>"#,
         version = esc(&s.version),
         name = esc(&s.form.name),
         code = esc(&s.form.code),
@@ -442,18 +448,24 @@ fn render_composer(app: &AppRef) {
         .find(|c| c.id == s.selected)
         .map(|c| c.name.as_str())
         .unwrap_or("чат");
+    let unavailable = s.reconnecting
+        || s.selected.is_empty()
+        || !s
+            .ws
+            .as_ref()
+            .is_some_and(|ws| ws.ready_state() == WebSocket::OPEN);
     let upload=s.upload.as_ref().map(|u|format!("<div class='upload-status' data-testid='upload-progress'><span id='upload-label'>↑ {} · {}%</span><button data-action='cancel-upload' title='Отменить'>×</button><progress id='upload-meter' max='100' value='{}'></progress></div>",esc(&u.name),u.percent,u.percent)).unwrap_or_default();
     let content = format!(
         "{upload}<div class='composer'><button class='attach-button' data-action='attach' data-testid='attach-file' title='Прикрепить файл' {}>+</button><textarea id='message-input' data-testid='message-input' data-field='draft' rows='1' maxlength='8000' placeholder='Написать в #{}' {}>{}</textarea><button class='send-button' data-action='send' data-testid='send-message' title='Отправить сообщение' {}>➤</button></div><div class='composer-help'><span><kbd>Enter</kbd> отправить <span>·</span> <kbd>Shift + Enter</kbd> новая строка</span><span>Всё остаётся в вашей сети <span class='mini-spark'>ϟ</span></span></div>",
-        if s.upload.is_some() || s.reconnecting {
+        if s.upload.is_some() || unavailable {
             "disabled"
         } else {
             ""
         },
         esc(name),
-        if s.reconnecting { "disabled" } else { "" },
+        if unavailable { "disabled" } else { "" },
         esc(&s.draft),
-        if s.reconnecting { "disabled" } else { "" }
+        if unavailable { "disabled" } else { "" }
     );
     drop(s);
     html("composer", &content);
@@ -679,7 +691,7 @@ fn render_voice(app: &AppRef) {
 
 fn render_overlay(app: &AppRef) {
     let s = app.borrow();
-    let viewer = if s.modal.as_deref() == Some("viewer") {
+    let viewer = if s.invite.is_none() && s.modal.as_deref() == Some("viewer") {
         s.expanded_stream.as_ref().and_then(|(peer, kind)| {
             s.streams.get(&(peer.clone(), kind.clone())).map(|stream| {
                 // Preserve the same JS stream/track identity. MediaStream's
@@ -709,16 +721,19 @@ fn render_overlay(app: &AppRef) {
         let content=match modal.as_str() {
             "viewer"=>viewer.as_ref().map(|(peer,kind,_)|{
                 let name=if peer=="local"{"Вы"}else{s.peers.iter().find(|p|&p.id==peer).map(|p|p.name.as_str()).unwrap_or("Участник")};
-                format!("<div class='viewer-heading'><span>{}</span><h2>{}</h2><small>Esc — вернуться к разговору</small></div><video id='expanded-video' data-testid='expanded-video' autoplay playsinline muted></video>",if kind=="screen"{"ДЕМОНСТРАЦИЯ ЭКРАНА"}else{"КАМЕРА"},esc(name))
+                format!("<div class='viewer-heading'><span>{}</span><h2>{}</h2><button data-action='fullscreen-video' data-testid='fullscreen-video' title='На весь экран'>⛶ На весь экран</button><small>Esc — назад</small></div><video id='expanded-video' data-testid='expanded-video' autoplay playsinline muted></video>",if kind=="screen"{"ДЕМОНСТРАЦИЯ ЭКРАНА"}else{"КАМЕРА"},esc(name))
             }).unwrap_or_default(),
             "channel"=>format!("<span class='eyebrow'>ВАШЕ ПРОСТРАНСТВО</span><h2>Создать канал</h2><label class='field'>Название<input id='channel-name' data-field='channel-name' data-testid='channel-name' maxlength='64' value='{}' placeholder='Например: идеи'/></label><label class='field'>Тип канала<select data-field='channel-kind' data-testid='channel-kind'><option value='text' {}>Текстовый</option><option value='voice' {}>Голосовой</option></select></label><div class='modal-actions'><button data-action='close-modal'>Отмена</button><button class='primary' data-action='create-channel' data-testid='create-channel'>Создать</button></div>",esc(&s.form.channel_name),if s.form.channel_kind=="text" {"selected"} else {""},if s.form.channel_kind=="voice" {"selected"} else {""}),
-            "settings"=>format!("<span class='eyebrow'>SPARK · {}</span><h2>Настройки</h2><label class='field'>Ваше имя<input data-field='settings-name' data-testid='settings-name' maxlength='64' value='{}'/></label><div class='settings-info'><strong>Локальная комната</strong><p>{}</p><code>{}</code><small>{}</small></div><div class='modal-actions'><button class='danger-text' data-action='disconnect' data-testid='disconnect'>{}</button><button class='primary' data-action='save-settings' data-testid='save-settings'>Сохранить</button></div>",esc(&s.version),esc(&s.form.settings_name),s.conn.as_ref().map(|c|esc(&c.server_name)).unwrap_or_default(),s.conn.as_ref().map(|c|esc(&c.address)).unwrap_or_default(),if s.conn.as_ref().is_some_and(|c|c.hosting) {"Вы — создатель. При выходе комната остановится для всех."} else {"Вы подключены к комнате в локальной сети."},if s.conn.as_ref().is_some_and(|c|c.hosting) {"Остановить комнату"} else {"Выйти из комнаты"}),
+            "settings"=>format!("<span class='eyebrow'>SPARK · {}</span><h2>Настройки</h2><label class='field'>Ваше имя<input data-field='settings-name' data-testid='settings-name' maxlength='64' value='{}'/></label>{}<div class='settings-info'><strong>Локальная комната</strong><p>{}</p><code>{}</code><small>{}</small></div><div class='modal-actions'>{}<button class='primary' data-action='save-settings' data-testid='save-settings'>Сохранить имя</button></div>",esc(&s.version),esc(&s.form.settings_name),preferences::controls(&s.preferences),s.conn.as_ref().map(|c|esc(&c.server_name)).unwrap_or_else(||"Нет подключения".into()),s.conn.as_ref().map(|c|esc(&c.address)).unwrap_or_default(),if s.conn.as_ref().is_some_and(|c|c.hosting) {"Вы — создатель. При выходе комната остановится для всех."} else {"Настройки оформления действуют на этом компьютере."},if s.conn.is_some(){format!("<button class='danger-text' data-action='disconnect' data-testid='disconnect'>{}</button>",if s.conn.as_ref().is_some_and(|c|c.hosting){"Остановить комнату"}else{"Выйти из комнаты"})}else{String::new()}),
             "sources"=>{let mut x="<span class='eyebrow'>ДЕМОНСТРАЦИЯ ЭКРАНА</span><h2>Что показать команде?</h2><p>Выберите экран или отдельное окно.</p><div class='sources'>".to_string();for src in &s.sources { x.push_str(&format!("<button class='source' data-action='select-source' data-id='{}' data-testid='source-{}'><img src='{}' alt=''/><strong>{}</strong></button>",esc(&src.id),esc(&src.id),esc(&src.thumbnail),esc(&src.name))); }x.push_str("</div><div class='modal-actions'><button data-action='close-modal'>Отмена</button></div>");x},
             _=>"<div class='brand-mark'>ϟ</div><h2>Spark</h2><p>Общение рядом. Чаты, голос, видео и файлы в вашей локальной сети.</p><div class='modal-actions'><button class='primary' data-action='close-modal'>Понятно</button></div>".into()
         };
-        out.push_str(&format!("<div class='modal-shade'><section class='modal {}'><button class='modal-close' data-action='close-modal' data-testid='{}' title='Закрыть'>×</button>{content}</section></div>",if modal=="viewer"{"video-viewer"}else{""},if modal=="viewer"{"close-video"}else{"close-modal"}));
+        out.push_str(&format!("<div class='modal-shade'><section class='modal {}'><button class='modal-close' data-action='close-modal' data-testid='{}' title='Закрыть'>×</button>{content}</section></div>",if modal=="viewer"{"video-viewer"}else if modal=="settings"{"settings-modal"}else{""},if modal=="viewer"{"close-video"}else{"close-modal"}));
     }
     drop(s);
+    if viewer.is_none() && document().fullscreen_element().is_some() {
+        document().exit_fullscreen();
+    }
     html("overlay", &out);
     if let Some((_, _, stream)) = viewer {
         if let Some(video) =
@@ -780,6 +795,13 @@ fn install_events(app: &AppRef) {
             .and_then(|v| v.as_string())
             .unwrap_or_default();
         if let Some(field) = target.get_attribute("data-field") {
+            if field.starts_with("pref-") {
+                let checked = target
+                    .dyn_ref::<HtmlInputElement>()
+                    .is_some_and(|i| i.checked());
+                preferences::input(&a, &field, &value, checked);
+                return;
+            }
             let mut s = a.borrow_mut();
             match field.as_str() {
                 "name" => s.form.name = value,
@@ -822,7 +844,27 @@ fn install_events(app: &AppRef) {
                 ev.prevent_default();
                 send_chat(&a);
             }
+            if (ev.ctrl_key() || ev.meta_key())
+                && matches!(ev.key().as_str(), "+" | "=" | "-" | "0")
+            {
+                ev.prevent_default();
+                {
+                    let mut s = a.borrow_mut();
+                    s.preferences.zoom = match ev.key().as_str() {
+                        "0" => 100,
+                        "-" => s.preferences.zoom.saturating_sub(5).max(75),
+                        _ => (s.preferences.zoom + 5).min(150),
+                    };
+                }
+                preferences::persist(&a);
+                if a.borrow().modal.as_deref() == Some("settings") {
+                    render_overlay(&a);
+                }
+            }
             if ev.key() == "Escape" {
+                if document().fullscreen_element().is_some() {
+                    document().exit_fullscreen();
+                }
                 let mut s = a.borrow_mut();
                 s.modal = None;
                 s.expanded_stream = None;
@@ -830,7 +872,8 @@ fn install_events(app: &AppRef) {
                 render_overlay(&a);
             }
         });
-    root.add_event_listener_with_callback("keydown", key.as_ref().unchecked_ref())
+    document()
+        .add_event_listener_with_callback("keydown", key.as_ref().unchecked_ref())
         .expect("keyboard");
     key.forget();
     let a = app.clone();
@@ -978,9 +1021,46 @@ fn action_handler(app: &AppRef, action: &str, id: &str, name: &str) {
             drop(s);
             render_overlay(app);
         }
+        "reset-zoom" => {
+            app.borrow_mut().preferences.zoom = 100;
+            preferences::persist(app);
+            render_overlay(app);
+        }
+        "preview-sound" => preferences::sound(app, id),
+        "quit" => {
+            let a = app.clone();
+            spawn_local(async move {
+                if let Err(e) = desktop_call("quit", &[]).await {
+                    error(&a, e);
+                }
+            });
+        }
+        "fullscreen-video" => {
+            if document().fullscreen_element().is_some() {
+                document().exit_fullscreen();
+            } else if let Some(root) = document().document_element() {
+                let result = Reflect::get(&root, &JsValue::from_str("requestFullscreen"))
+                    .and_then(|f| f.dyn_into::<Function>())
+                    .and_then(|f| f.call0(&root));
+                match result {
+                    Ok(p) => {
+                        let a = app.clone();
+                        spawn_local(async move {
+                            if let Err(e) = JsFuture::from(Promise::resolve(&p)).await {
+                                error(&a, err_text(e));
+                            }
+                        });
+                    }
+                    Err(e) => error(app, err_text(e)),
+                }
+            }
+        }
         "save-settings" => save_settings(app),
         "disconnect" => disconnect(app),
         "close-modal" => {
+            if document().fullscreen_element().is_some() {
+                document().exit_fullscreen();
+            }
             let mut s = app.borrow_mut();
             s.modal = None;
             s.expanded_stream = None;
@@ -1354,6 +1434,7 @@ fn open_socket(app: &AppRef) {
         if s.generation != generation || s.conn.is_none() {
             return;
         }
+        let was_reconnecting = s.reconnecting;
         s.ws = None;
         s.reconnecting = true;
         s.voice_generation = s.voice_generation.wrapping_add(1);
@@ -1361,6 +1442,9 @@ fn open_socket(app: &AppRef) {
         drop(s);
         if let Some(m) = media {
             m.leave();
+        }
+        if !was_reconnecting {
+            preferences::sound(&a, "disconnect");
         }
         render_sidebar(&a);
         render_header(&a);
@@ -1394,6 +1478,44 @@ fn open_socket(app: &AppRef) {
 }
 
 fn server_event(app: &AppRef, event: ServerEvent) {
+    let peer_cue = {
+        let s = app.borrow();
+        match &event {
+            ServerEvent::PeerJoined { peer }
+                if s.profile.as_ref().is_some_and(|p| p.id != peer.id) =>
+            {
+                Some("connect")
+            }
+            ServerEvent::PeerLeft { peer_id } if s.peers.iter().any(|p| &p.id == peer_id) => {
+                Some("disconnect")
+            }
+            ServerEvent::Presence { peer }
+                if s.profile.as_ref().is_some_and(|p| p.id != peer.id) =>
+            {
+                let old = s
+                    .peers
+                    .iter()
+                    .find(|p| p.id == peer.id)
+                    .and_then(|p| p.voice_channel.as_ref());
+                let current = s.media_state.channel_id.as_ref();
+                if current.is_some() && old != peer.voice_channel.as_ref() {
+                    if peer.voice_channel.as_ref() == current {
+                        Some("connect")
+                    } else if old == current {
+                        Some("disconnect")
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(cue) = peer_cue {
+        preferences::sound(app, cue);
+    }
     match event {
         ServerEvent::Welcome {
             self_id,
@@ -1432,6 +1554,7 @@ fn server_event(app: &AppRef, event: ServerEvent) {
             if let Some(m) = previous {
                 m.leave();
             }
+            preferences::sound(app, "connect");
             install_media(app, self_id);
             render(app);
         }
@@ -1478,10 +1601,18 @@ fn server_event(app: &AppRef, event: ServerEvent) {
         ServerEvent::Chat { message } => {
             let mut s = app.borrow_mut();
             let selected = message.channel_id == s.selected;
+            let notify = s
+                .profile
+                .as_ref()
+                .is_some_and(|p| p.id != message.sender_id)
+                && !s.messages.iter().any(|m| m.id == message.id);
             if !s.messages.iter().any(|m| m.id == message.id) {
                 s.messages.push(message);
             }
             drop(s);
+            if notify {
+                preferences::sound(app, "notification");
+            }
             if selected {
                 render_messages(app, true);
             }
@@ -1513,6 +1644,7 @@ fn server_event(app: &AppRef, event: ServerEvent) {
             channel_id,
             video,
         } => {
+            preferences::sound(app, "invite");
             app.borrow_mut().invite = Some(Invite {
                 from,
                 channel_id,
@@ -1548,6 +1680,27 @@ fn install_media(app: &AppRef, self_id: String) {
     let weak = Rc::downgrade(app);
     let on_state = Rc::new(move |state: MediaState| {
         if let Some(a) = weak.upgrade() {
+            let cue = {
+                let s = a.borrow();
+                let old = &s.media_state;
+                if old.channel_id != state.channel_id {
+                    Some(if state.channel_id.is_some() {
+                        "connect"
+                    } else {
+                        "disconnect"
+                    })
+                } else if old.deafened != state.deafened {
+                    Some(if state.deafened {
+                        "sound-off"
+                    } else {
+                        "sound-on"
+                    })
+                } else if old.muted != state.muted {
+                    Some(if state.muted { "mic-off" } else { "mic-on" })
+                } else {
+                    None
+                }
+            };
             let close_viewer = {
                 let mut s = a.borrow_mut();
                 s.media_state = state.clone();
@@ -1558,6 +1711,12 @@ fn install_media(app: &AppRef, self_id: String) {
                 }
                 close
             };
+            if let Some(cue) = cue {
+                preferences::sound(&a, cue);
+            }
+            if close_viewer && document().fullscreen_element().is_some() {
+                document().exit_fullscreen();
+            }
             let connected = {
                 let s = a.borrow();
                 s.conn.is_some()
@@ -1939,9 +2098,14 @@ fn save_settings(app: &AppRef) {
                 s.form.name = profile.name.clone();
                 s.profile = Some(profile);
                 s.modal = None;
-                s.notice = Some("Имя сохранено. Обновляем соединение с комнатой.".into());
+                s.notice = Some("Имя сохранено.".into());
                 let ws = s.ws.clone();
                 drop(s);
+                if let Some(input) =
+                    element("display-name").and_then(|e| e.dyn_into::<HtmlInputElement>().ok())
+                {
+                    input.set_value(&name);
+                }
                 render_sidebar(&a);
                 render_overlay(&a);
                 if let Some(ws) = ws {
@@ -1958,6 +2122,7 @@ fn disconnect(app: &AppRef) {
     spawn_local(async move {
         match api::<Value>(&token, "POST", "/api/disconnect", Some(json!({}))).await {
             Ok(_) => {
+                preferences::sound(&a, "disconnect");
                 let mut s = a.borrow_mut();
                 s.generation += 1;
                 s.voice_generation = s.voice_generation.wrapping_add(1);
