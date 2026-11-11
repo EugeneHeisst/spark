@@ -13,7 +13,7 @@ pub struct Status {
 
 pub fn activity(app: &AppRef) -> Value {
     let s = app.borrow();
-    json!({"inCall":s.media_state.channel_id.is_some(),"transferring":s.upload.is_some(),"hosting":s.conn.as_ref().is_some_and(|c|c.hosting)})
+    json!({"inCall":s.media_state.channel_id.is_some(),"transferring":s.upload.is_some(),"hosting":s.busy || s.conn.as_ref().is_some_and(|c|c.hosting)})
 }
 
 pub fn report_activity(app: &AppRef) {
@@ -54,14 +54,16 @@ pub fn panel(app: &AppRef) -> String {
             }
         }
     };
-    let blocked = s.media_state.channel_id.is_some()
+    let blocked = s.busy
+        || s.media_state.channel_id.is_some()
         || s.upload.is_some()
         || s.conn.as_ref().is_some_and(|c| c.hosting);
-    let busy = matches!(u.state.as_str(), "checking" | "downloading" | "installing");
+    let busy = s.update_installing
+        || matches!(u.state.as_str(), "checking" | "downloading" | "installing");
     let install = if u.state == "ready" {
         format!(
             "<button class='primary' data-action='install-update' data-testid='install-update' {}>Перезапустить и обновить</button>",
-            if blocked { "disabled" } else { "" }
+            if blocked || busy { "disabled" } else { "" }
         )
     } else {
         String::new()
@@ -165,6 +167,9 @@ pub fn start(app: &AppRef) {
 }
 
 pub fn action(app: &AppRef, install: bool) {
+    if app.borrow().update_installing {
+        return;
+    }
     let payload = activity(app);
     if install
         && ["inCall", "transferring", "hosting"]
@@ -177,6 +182,12 @@ pub fn action(app: &AppRef, install: bool) {
         );
         return;
     }
+    // Lock new calls, hosting and file transfers before yielding to native IPC.
+    // Archive preparation takes time; the activity snapshot must stay valid.
+    if install {
+        app.borrow_mut().update_installing = true;
+        html("updates-panel", &panel(app));
+    }
     let a = app.clone();
     spawn_local(async move {
         let args = if install {
@@ -186,7 +197,7 @@ pub fn action(app: &AppRef, install: bool) {
         } else {
             vec![]
         };
-        if let Err(e) = desktop_call(
+        let result = desktop_call(
             if install {
                 "installUpdate"
             } else {
@@ -194,8 +205,11 @@ pub fn action(app: &AppRef, install: bool) {
             },
             &args,
         )
-        .await
-        {
+        .await;
+        if install {
+            a.borrow_mut().update_installing = false;
+        }
+        if let Err(e) = result {
             error(&a, e);
         }
         poll(&a);

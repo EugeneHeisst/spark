@@ -246,8 +246,11 @@ function installIpc() {
   });
   ipcMain.handle('spark:save-file', async (event, input) => {
     trustedIpc(event);
+    if (updater.status().state === 'installing') throw new Error('Дождитесь завершения обновления Spark');
     if (!input || typeof input.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(input.id)
         || typeof input.name !== 'string') throw new Error('Некорректный файл');
+    nativeTransfers++;
+    try {
     const fileName = path.basename(input.name.replaceAll('\\', '/')).replace(/[<>:"|?*\x00-\x1f]/g, '_') || 'file';
     let destination;
     if (testing && process.env.SPARK_E2E_DOWNLOAD_DIR) {
@@ -259,8 +262,6 @@ function installIpc() {
       if (result.canceled || !result.filePath) return { canceled: true };
       destination = result.filePath;
     }
-    nativeTransfers++;
-    try {
     const response = await fetch(new URL('/api/save', boot.url), { method: 'POST',
       headers: { 'content-type': 'application/json', 'x-spark-token': boot.token },
       body: JSON.stringify({ file_id: input.id, path: destination, overwrite: fs.existsSync(destination) }) });

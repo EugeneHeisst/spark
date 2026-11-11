@@ -52,6 +52,7 @@ struct App {
     preferences: preferences::Preferences,
     update: updates::Status,
     update_poll_busy: bool,
+    update_installing: bool,
     token: String,
     profile: Option<Profile>,
     version: String,
@@ -920,6 +921,9 @@ fn install_events(app: &AppRef) {
 }
 
 fn action_handler(app: &AppRef, action: &str, id: &str, name: &str) {
+    if app.borrow().update_installing {
+        return;
+    }
     match action {
         "reload" => {
             let _ = window().location().reload();
@@ -1301,6 +1305,9 @@ fn capture_onboarding_fields(app: &AppRef) {
 }
 
 fn connect(app: &AppRef) {
+    if app.borrow().update_installing {
+        return;
+    }
     capture_onboarding_fields(app);
     let mut s = app.borrow_mut();
     if s.busy {
@@ -1339,6 +1346,7 @@ fn connect(app: &AppRef) {
     s.error = None;
     drop(s);
     render_onboarding(app);
+    updates::report_activity(app);
     let a = app.clone();
     spawn_local(async move {
         let result = async {
@@ -1380,6 +1388,9 @@ fn connect(app: &AppRef) {
     });
 }
 fn send_chat(app: &AppRef) {
+    if app.borrow().update_installing {
+        return;
+    }
     let s = app.borrow();
     let text = s.draft.trim().to_owned();
     let channel_id = s.selected.clone();
@@ -1728,6 +1739,7 @@ fn install_media(app: &AppRef, self_id: String) {
             if let Some(cue) = cue {
                 preferences::sound(&a, cue);
             }
+            updates::report_activity(&a);
             if close_viewer && document().fullscreen_element().is_some() {
                 document().exit_fullscreen();
             }
@@ -1811,6 +1823,9 @@ fn install_media(app: &AppRef, self_id: String) {
     app.borrow_mut().media = Some(manager);
 }
 fn join_voice(app: &AppRef, channel_id: String, video: bool) {
+    if app.borrow().update_installing {
+        return;
+    }
     let s = app.borrow();
     let Some(manager) = s.media.clone() else {
         drop(s);
@@ -1971,6 +1986,9 @@ fn download(app: &AppRef, id: String, name: String) {
 }
 
 fn start_upload(app: &AppRef, file: web_sys::File) {
+    if app.borrow().update_installing {
+        return;
+    }
     let s = app.borrow();
     if s.upload.is_some() {
         drop(s);
