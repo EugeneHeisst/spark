@@ -6,19 +6,15 @@ on:
       windows_run:
         description: Successful Windows build job run ID
         required: true
-        default: '43043486238'
       linux_run:
         description: Successful Linux build job run ID
         required: true
-        default: '43046329617'
       app_commit:
         description: Full SHA of the verified application code
         required: true
-        default: '9abc2b55e51d85b1f8ac4bb8cfc59c4ad26d09d0'
       tag:
         description: Release tag matching package.json (vX.Y.Z)
         required: true
-        default: 'v0.1.0'
 
 permissions:
   actions: read
@@ -43,6 +39,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Validate inputs, successful platform jobs and application code
         shell: bash
@@ -71,7 +71,6 @@ jobs:
           version = json.loads(Path("package.json").read_text())["version"]
           require(tag == "v" + version, "tag does not match package.json version")
           require(Path("RELEASE_NOTES.md").is_file(), "RELEASE_NOTES.md is missing")
-          require(api(f"repos/{repo}")["private"], "This workflow only publishes to a private repository")
 
           heads = {os.environ["GITHUB_SHA"]}
           for variable, job_name in [("WINDOWS_RUN", "build (windows-2025)"),
@@ -122,37 +121,23 @@ jobs:
           github-token: ${{ github.token }}
           path: release-assets
 
-      - name: Verify four packages and generate SHA256SUMS
+      - name: Verify three packages and generate update metadata
         shell: bash
         run: |
           set -euo pipefail
-          python3 <<'PY'
-          import hashlib
-          import json
-          import os
+          node scripts/update-manifest.mjs release-assets
+          python3 <<'PYMETA'
+          import json, os
           from pathlib import Path
-
-          version = os.environ["RELEASE_TAG"][1:]
           directory = Path("release-assets")
-          expected = {f"Spark-{version}-linux-x86_64.AppImage", f"Spark-{version}-linux-x64.tar.gz",
-                      f"Spark-{version}-windows-setup.exe", f"Spark-{version}-windows-x64.zip"}
-          if {path.name for path in directory.iterdir()} != expected:
-              raise SystemExit("Downloaded artifact filenames do not match the four expected packages")
-          checksums = []
-          for name in sorted(expected):
-              path = directory / name
-              if not path.is_file() or path.stat().st_size == 0:
-                  raise SystemExit(f"Missing or empty package: {name}")
-              digest = hashlib.sha256()
-              with path.open("rb") as source:
-                  for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                      digest.update(chunk)
-              checksums.append(f"{digest.hexdigest()}  {name}\n")
-          (directory / "SHA256SUMS").write_text("".join(checksums))
-          sizes = {path.name: path.stat().st_size for path in directory.iterdir()}
+          version = os.environ["RELEASE_TAG"][1:]
+          expected = {f"Spark-{version}-linux-x64.tar.gz", f"Spark-{version}-windows-x64.zip",
+                      f"Spark-{version}-windows-setup.exe", "spark-update.json", "SHA256SUMS"}
+          if {p.name for p in directory.iterdir()} != expected:
+              raise SystemExit("Expected exactly three current packages plus update metadata and SHA256SUMS")
+          sizes = {p.name: p.stat().st_size for p in directory.iterdir()}
           (Path(os.environ["RUNNER_TEMP"]) / "spark-release-sizes.json").write_text(json.dumps(sizes))
-          print("".join(checksums), end="")
-          PY
+          PYMETA
 
       - name: Stage release as draft and upload packages
         shell: bash
@@ -187,7 +172,13 @@ jobs:
           uploaded = {asset["name"]: asset["size"] for asset in release["assets"]}
           if not release["isDraft"] or uploaded != expected:
               raise SystemExit("Release must remain draft until every expected asset has the correct name and size")
-          print("All four packages and SHA256SUMS are uploaded with matching sizes.")
+          if len(release["assets"]) != 5:
+              raise SystemExit("Expected exactly five release assets")
+          print("Three packages, spark-update.json and SHA256SUMS have matching names and sizes.")
           PY
-          gh release edit "$RELEASE_TAG" --draft=false
+          mkdir "$RUNNER_TEMP/spark-release-download"
+          gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/spark-release-download"
+          cmp release-assets/SHA256SUMS "$RUNNER_TEMP/spark-release-download/SHA256SUMS"
+          (cd "$RUNNER_TEMP/spark-release-download" && sha256sum -c SHA256SUMS)
+          gh release edit "$RELEASE_TAG" --draft=false --latest
           gh release view "$RELEASE_TAG" --json url,isDraft

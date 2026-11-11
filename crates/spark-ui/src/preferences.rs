@@ -11,6 +11,7 @@ pub struct Preferences {
     pub volume: u16,
     pub close_to_tray: bool,
     pub compact: bool,
+    pub auto_updates: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -22,6 +23,7 @@ impl Default for Preferences {
             volume: 55,
             close_to_tray: true,
             compact: false,
+            auto_updates: true,
         }
     }
 }
@@ -161,6 +163,7 @@ pub fn input(app: &AppRef, field: &str, value: &str, checked: bool) {
             "pref-sounds" => p.sounds = checked,
             "pref-tray" => p.close_to_tray = checked,
             "pref-compact" => p.compact = checked,
+            "pref-updates" => p.auto_updates = checked,
             _ => return,
         }
         html("zoom-label", &format!("{}%", p.zoom));

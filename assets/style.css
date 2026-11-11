@@ -39,3 +39,5 @@
 :root:fullscreen .modal-shade:has(.video-viewer){padding:0;background:#090b10;backdrop-filter:none}
 :root:fullscreen .video-viewer .viewer-heading{height:30px;margin-bottom:10px}
 @media(max-width:900px){body{min-width:560px}.workspace{grid-template-columns:54px 180px minmax(0,1fr)}.members{display:none}.chat-header{padding:0 14px}.channel-title h1{max-width:180px}.onboarding{grid-template-columns:1fr;padding:24px;gap:24px;min-height:100dvh}.onboard-info{position:relative}.onboard-info>:not(.brand-lockup):not(.onboard-settings){display:none}.onboard-settings{position:absolute;right:0;top:0;margin:0}.onboard-card{width:min(500px,100%);justify-self:center}.viewer-heading small{display:none}.viewer-heading{gap:8px}.viewer-heading>span{font-size:7px}.viewer-heading button{font-size:9px}}
+
+#updates-panel>p{font-size:12px;line-height:1.6;color:var(--text)}.update-actions{display:flex;flex-wrap:wrap;gap:8px}.update-actions button{font-size:11px;padding:10px 13px}.update-error{color:var(--danger)!important}.toast.update-ready{bottom:145px;border-color:rgb(var(--accent-rgb) / .3)}

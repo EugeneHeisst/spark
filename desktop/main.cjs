@@ -3,6 +3,7 @@ const { app, BrowserWindow, Menu, dialog, desktopCapturer, ipcMain, session, Tra
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { createUpdater } = require('./updater.cjs');
 
 app.setName('Spark');
 app.setAppUserModelId('dev.eugeneheisst.spark');
@@ -22,7 +23,35 @@ let mainWindow;
 let boot;
 let tray;
 let preferences;
-const defaults = { theme: 'dark', accent: '#ffb251', zoom: 100, sounds: true, volume: 55, close_to_tray: true, compact: false };
+let updater;
+let updateScheduled = false;
+let activity = { inCall: false, transferring: false, hosting: false };
+let nativeTransfers = 0;
+function normalizeActivity(input) {
+  if (!input || ['inCall', 'transferring', 'hosting'].some(key => typeof input[key] !== 'boolean')) {
+    throw new Error('Некорректное состояние клиента');
+  }
+  return { inCall: input.inCall, transferring: input.transferring, hosting: input.hosting };
+}
+async function prepareUpdateRestart() {
+  if (activity.inCall || activity.transferring || activity.hosting || nativeTransfers) {
+    throw new Error('Перед обновлением завершите звонок и передачу файлов и остановите созданную комнату.');
+  }
+  quitting = true;
+  const service = child;
+  if (!service || service.exitCode !== null) return;
+  try {
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => { cleanup(); reject(new Error('Не удалось остановить ядро перед обновлением')); }, 10_000);
+      const done = () => { cleanup(); resolve(); };
+      const cleanup = () => { clearTimeout(timeout); service.removeListener('exit', done); };
+      service.once('exit', done);
+      service.kill(process.platform === 'win32' ? undefined : 'SIGINT');
+      if (service.exitCode !== null) done();
+    });
+  } catch (error) { quitting = false; throw error; }
+}
+const defaults = { theme: 'dark', accent: '#ffb251', zoom: 100, sounds: true, volume: 55, close_to_tray: true, compact: false, auto_updates: true };
 function normalizePreferences(input) {
   const p = input || {};
   return { theme: ['dark', 'light', 'midnight'].includes(p.theme) ? p.theme : defaults.theme,
@@ -31,7 +60,8 @@ function normalizePreferences(input) {
     sounds: typeof p.sounds === 'boolean' ? p.sounds : defaults.sounds,
     volume: Number.isInteger(p.volume) ? Math.min(100, Math.max(0, p.volume)) : defaults.volume,
     close_to_tray: typeof p.close_to_tray === 'boolean' ? p.close_to_tray : defaults.close_to_tray,
-    compact: typeof p.compact === 'boolean' ? p.compact : defaults.compact };
+    compact: typeof p.compact === 'boolean' ? p.compact : defaults.compact,
+    auto_updates: typeof p.auto_updates === 'boolean' ? p.auto_updates : defaults.auto_updates };
 }
 function showWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -147,6 +177,32 @@ function installPermissions() {
 }
 
 function installIpc() {
+  ipcMain.handle('spark:update-status', event => { trustedIpc(event); return updater.status(); });
+  ipcMain.handle('spark:check-updates', event => { trustedIpc(event); return updater.check(); });
+  ipcMain.handle('spark:activity', (event, input) => { trustedIpc(event); activity = normalizeActivity(input); });
+  ipcMain.handle('spark:install-update', async (event, input) => {
+    trustedIpc(event);
+    activity = normalizeActivity(input);
+    if (activity.inCall || activity.transferring || activity.hosting || nativeTransfers) {
+      throw new Error('Перед обновлением завершите звонок и передачу файлов и остановите созданную комнату.');
+    }
+    try { return await updater.install(); }
+    catch (error) {
+      quitting = false;
+      // A failed update preparation must keep the current client usable.
+      if (child && child.exitCode !== null) {
+        dialog.showErrorBox('Spark — обновление не установлено', error.message + '\nПерезапустите Spark, чтобы восстановить подключение.');
+        app.quit();
+      }
+      throw error;
+    }
+  });
+  ipcMain.handle('spark:ready', async event => {
+    trustedIpc(event);
+    await updater.acknowledge();
+    if (!updateScheduled) { updateScheduled = true; updater.schedule(); }
+    return true;
+  });
   ipcMain.handle('spark:get-settings', event => { trustedIpc(event); return preferences; });
   ipcMain.handle('spark:set-settings', (event, input) => {
     trustedIpc(event);
@@ -155,7 +211,9 @@ function installIpc() {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.writeFileSync(destination + '.tmp', JSON.stringify(next), { mode: 0o600 });
     fs.renameSync(destination + '.tmp', destination);
+    const changedUpdates = preferences.auto_updates !== next.auto_updates;
     preferences = next;
+    if (changedUpdates && updateScheduled) { updater.stop(); if (next.auto_updates) updater.schedule(); }
     mainWindow.webContents.setZoomFactor(next.zoom / 100);
     return next;
   });
@@ -201,12 +259,15 @@ function installIpc() {
       if (result.canceled || !result.filePath) return { canceled: true };
       destination = result.filePath;
     }
+    nativeTransfers++;
+    try {
     const response = await fetch(new URL('/api/save', boot.url), { method: 'POST',
       headers: { 'content-type': 'application/json', 'x-spark-token': boot.token },
       body: JSON.stringify({ file_id: input.id, path: destination, overwrite: fs.existsSync(destination) }) });
     const value = await response.json();
     if (!response.ok) throw new Error(value.error || 'Не удалось сохранить файл');
     return value;
+    } finally { nativeTransfers--; }
   });
 }
 
@@ -220,6 +281,8 @@ else {
       Menu.setApplicationMenu(null);
       try { preferences = normalizePreferences(JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'preferences.json'), 'utf8'))); }
       catch { preferences = { ...defaults }; }
+      updater = createUpdater({ app, userData: app.getPath('userData'), getPreferences: () => preferences,
+        beforeInstall: prepareUpdateRestart });
       boot = await startService();
       if (quitting) return;
       installPermissions();
@@ -249,6 +312,7 @@ app.on('activate', showWindow);
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', () => {
   quitting = true;
+  updater?.stop();
   tray?.destroy();
   tray = undefined;
   if (child && child.exitCode === null) child.kill(process.platform === 'win32' ? undefined : 'SIGINT');

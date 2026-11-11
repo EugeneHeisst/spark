@@ -34,18 +34,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The hosted image's mirror+file selector chose an unreachable Azure
-          # HTTP mirror. Scope this job to official Ubuntu HTTPS repositories.
+          # Use preinstalled desktop capabilities first; avoid APT when complete.
+          desktop_libraries=$(ldconfig -p)
+          packages=()
+          need_library() { if [[ "$desktop_libraries" != *"$1"* ]]; then packages+=("$2"); fi; }
+          need_library libgtk-3.so.0 libgtk-3-0t64
+          need_library libnss3.so libnss3
+          need_library libasound.so.2 libasound2t64
+          need_library libgbm.so.1 libgbm1
+          need_library libXss.so.1 libxss1
+          need_library libXtst.so.6 libxtst6
+          if ! command -v xvfb-run >/dev/null || ! command -v Xvfb >/dev/null; then packages+=(xvfb); fi
+          if ! command -v xauth >/dev/null; then packages+=(xauth); fi
+          if ! command -v dbus-run-session >/dev/null; then packages+=(dbus-daemon); fi
+          if ! command -v openbox >/dev/null && ! command -v kwin_x11 >/dev/null; then packages+=(openbox); fi
+          if [[ ${#packages[@]} -eq 0 ]]; then
+            echo 'Desktop libraries, Xvfb and window manager are already available.'
+            exit 0
+          fi
+          # Bound all network operations and use official Ubuntu HTTPS mirrors.
           cat > "${RUNNER_TEMP}/spark-ubuntu.list" <<'SOURCES'
           deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
           deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
           deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse
           SOURCES
           apt_options=(-o DPkg::Lock::Timeout=60 -o Acquire::Retries=2 -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Languages=none -o APT::Update::Error-Mode=any -o "Dir::Etc::sourcelist=${RUNNER_TEMP}/spark-ubuntu.list" -o Dir::Etc::sourceparts=-)
-          packages=(libgtk-3-0 libnss3 libasound2t64 libgbm1 libxss1 libxtst6 xvfb openbox dbus-x11)
           sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a timeout --kill-after=10s 120s apt-get "${apt_options[@]}" update
           sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a timeout --kill-after=10s 180s apt-get "${apt_options[@]}" install --no-install-recommends -y "${packages[@]}"
       - run: npm ci --no-audit --no-fund
+      - name: Update validation and installation tests
+        run: node --test tests/update/*.test.cjs
       - name: Rust tests (real sockets and disk)
         run: cargo test --locked -p spark-protocol -p spark-service
       - name: Rust source checks
@@ -79,7 +97,6 @@ jobs:
         with:
           name: spark-${{ runner.os }}
           path: |
-            dist/*.AppImage
             dist/*.tar.gz
             dist/*.exe
             dist/*.zip
@@ -97,20 +114,57 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - uses: actions/download-artifact@v4
         with:
           pattern: spark-*
-          path: dist
+          path: release-assets
           merge-multiple: true
-      - name: Publish verified packages
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Validate version and generate update metadata after both platform jobs pass
+        shell: bash
         run: |
-          cd dist
-          sha256sum Spark-* > SHA256SUMS.txt
-          cd ..
-          gh release create "$GITHUB_REF_NAME" dist/* --title "Spark $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v$(node -p 'require("./package.json").version')"
+          node scripts/update-manifest.mjs release-assets
+      - name: Stage verified packages as a draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          if draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            test "$draft" = true || { echo 'Refusing to modify a published release.' >&2; exit 1; }
+            gh release edit "$RELEASE_TAG" --draft=true --target "$GITHUB_SHA" --title "Spark $RELEASE_TAG" --notes-file RELEASE_NOTES.md
+          else
+            gh release create "$RELEASE_TAG" --draft --target "$GITHUB_SHA" --title "Spark $RELEASE_TAG" --notes-file RELEASE_NOTES.md
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
+      - name: Verify uploaded content and publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --json isDraft,assets > "$RUNNER_TEMP/spark-release.json"
+          python3 <<'PYVERIFY'
+          import json, os
+          from pathlib import Path
+          local = {p.name: p.stat().st_size for p in Path("release-assets").iterdir() if p.is_file()}
+          release = json.loads((Path(os.environ["RUNNER_TEMP"]) / "spark-release.json").read_text())
+          uploaded = {a["name"]: a["size"] for a in release["assets"]}
+          if not release["isDraft"] or len(release["assets"]) != 5 or uploaded != local:
+              raise SystemExit("Draft must contain exactly three packages, spark-update.json and SHA256SUMS with matching sizes")
+          PYVERIFY
+          mkdir "$RUNNER_TEMP/spark-release-download"
+          gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/spark-release-download"
+          cmp release-assets/SHA256SUMS "$RUNNER_TEMP/spark-release-download/SHA256SUMS"
+          (cd "$RUNNER_TEMP/spark-release-download" && sha256sum -c SHA256SUMS)
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+          gh release view "$RELEASE_TAG" --json url,isDraft

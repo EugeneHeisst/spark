@@ -1,6 +1,6 @@
 {
   "name": "spark-lan",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Spark — локальные чаты, звонки и файлы",
   "private": true,
   "author": "EugeneHeisst",
@@ -14,8 +14,9 @@
     "dev": "node scripts/build.mjs && electron .",
     "test:e2e": "playwright test",
     "test:e2e:linux": "node scripts/test-linux.mjs",
-    "package:linux": "electron-builder --linux AppImage tar.gz --x64",
-    "package:win": "electron-builder --win nsis zip --x64"
+    "package:linux": "node scripts/package-linux.mjs",
+    "package:win": "electron-builder --win nsis zip --x64",
+    "test:updates": "node --test tests/update/*.test.cjs"
   },
   "devDependencies": {
     "@playwright/test": "1.65.0",
@@ -31,9 +32,9 @@
       "output": "dist"
     },
     "files": [
-      "desktop/main.cjs",
-      "desktop/preload.cjs",
-      "package.json"
+      "desktop/*.cjs",
+      "package.json",
+      "LICENSE"
     ],
     "extraResources": [
       {
@@ -77,5 +78,10 @@
       "artifactName": "Spark-${version}-windows-setup.exe"
     },
     "publish": null
+  },
+  "dependencies": {
+    "@electron/asar": "4.3.1",
+    "tar-stream": "3.2.2",
+    "yauzl": "3.4.0"
   }
 }

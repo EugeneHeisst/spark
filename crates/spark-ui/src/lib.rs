@@ -1,6 +1,7 @@
 //! Spark's local-first desktop interface. All application and media logic is Rust.
 mod media;
 mod preferences;
+mod updates;
 
 use js_sys::{Function, Promise, Reflect};
 use leptos::prelude::*;
@@ -49,6 +50,8 @@ struct Invite {
 #[derive(Default)]
 struct App {
     preferences: preferences::Preferences,
+    update: updates::Status,
+    update_poll_busy: bool,
     token: String,
     profile: Option<Profile>,
     version: String,
@@ -229,6 +232,7 @@ pub fn start() {
                 }
                 render(&a);
                 discovery(&a);
+                updates::start(&a);
             }
             Err(e) => {
                 html(
@@ -430,6 +434,7 @@ fn render_messages(app: &AppRef, bottom: bool) {
     }
 }
 fn render_composer(app: &AppRef) {
+    updates::report_activity(app);
     let focused = document()
         .active_element()
         .is_some_and(|e| e.id() == "message-input");
@@ -690,6 +695,7 @@ fn render_voice(app: &AppRef) {
 }
 
 fn render_overlay(app: &AppRef) {
+    let update_controls = updates::controls(app);
     let s = app.borrow();
     let viewer = if s.invite.is_none() && s.modal.as_deref() == Some("viewer") {
         s.expanded_stream.as_ref().and_then(|(peer, kind)| {
@@ -703,6 +709,12 @@ fn render_overlay(app: &AppRef) {
         None
     };
     let mut out = String::new();
+    if s.update.state == "ready"
+        && s.modal.as_deref() != Some("settings")
+        && s.modal.as_deref() != Some("viewer")
+    {
+        out.push_str(&format!("<div class='toast update-ready' role='status'><span>↓</span><p>Готово обновление Spark {}</p><button data-action='settings'>Подробнее</button></div>",esc(s.update.version.as_deref().unwrap_or(""))));
+    }
     if let Some(e) = &s.error {
         out.push_str(&format!("<div class='toast error' role='alert' data-testid='error'><span>!</span><p>{}</p><button data-action='dismiss-error'>×</button></div>",esc(e)));
     }
@@ -724,7 +736,7 @@ fn render_overlay(app: &AppRef) {
                 format!("<div class='viewer-heading'><span>{}</span><h2>{}</h2><button data-action='fullscreen-video' data-testid='fullscreen-video' title='На весь экран'>⛶ На весь экран</button><small>Esc — назад</small></div><video id='expanded-video' data-testid='expanded-video' autoplay playsinline muted></video>",if kind=="screen"{"ДЕМОНСТРАЦИЯ ЭКРАНА"}else{"КАМЕРА"},esc(name))
             }).unwrap_or_default(),
             "channel"=>format!("<span class='eyebrow'>ВАШЕ ПРОСТРАНСТВО</span><h2>Создать канал</h2><label class='field'>Название<input id='channel-name' data-field='channel-name' data-testid='channel-name' maxlength='64' value='{}' placeholder='Например: идеи'/></label><label class='field'>Тип канала<select data-field='channel-kind' data-testid='channel-kind'><option value='text' {}>Текстовый</option><option value='voice' {}>Голосовой</option></select></label><div class='modal-actions'><button data-action='close-modal'>Отмена</button><button class='primary' data-action='create-channel' data-testid='create-channel'>Создать</button></div>",esc(&s.form.channel_name),if s.form.channel_kind=="text" {"selected"} else {""},if s.form.channel_kind=="voice" {"selected"} else {""}),
-            "settings"=>format!("<span class='eyebrow'>SPARK · {}</span><h2>Настройки</h2><label class='field'>Ваше имя<input data-field='settings-name' data-testid='settings-name' maxlength='64' value='{}'/></label>{}<div class='settings-info'><strong>Локальная комната</strong><p>{}</p><code>{}</code><small>{}</small></div><div class='modal-actions'>{}<button class='primary' data-action='save-settings' data-testid='save-settings'>Сохранить имя</button></div>",esc(&s.version),esc(&s.form.settings_name),preferences::controls(&s.preferences),s.conn.as_ref().map(|c|esc(&c.server_name)).unwrap_or_else(||"Нет подключения".into()),s.conn.as_ref().map(|c|esc(&c.address)).unwrap_or_default(),if s.conn.as_ref().is_some_and(|c|c.hosting) {"Вы — создатель. При выходе комната остановится для всех."} else {"Настройки оформления действуют на этом компьютере."},if s.conn.is_some(){format!("<button class='danger-text' data-action='disconnect' data-testid='disconnect'>{}</button>",if s.conn.as_ref().is_some_and(|c|c.hosting){"Остановить комнату"}else{"Выйти из комнаты"})}else{String::new()}),
+            "settings"=>format!("<span class='eyebrow'>SPARK · {}</span><h2>Настройки</h2><label class='field'>Ваше имя<input data-field='settings-name' data-testid='settings-name' maxlength='64' value='{}'/></label>{}<div class='settings-info'><strong>Локальная комната</strong><p>{}</p><code>{}</code><small>{}</small></div><div class='modal-actions'>{}<button class='primary' data-action='save-settings' data-testid='save-settings'>Сохранить имя</button></div>",esc(&s.version),esc(&s.form.settings_name),format!("{}{}",preferences::controls(&s.preferences),update_controls),s.conn.as_ref().map(|c|esc(&c.server_name)).unwrap_or_else(||"Нет подключения".into()),s.conn.as_ref().map(|c|esc(&c.address)).unwrap_or_default(),if s.conn.as_ref().is_some_and(|c|c.hosting) {"Вы — создатель. При выходе комната остановится для всех."} else {"Настройки оформления действуют на этом компьютере."},if s.conn.is_some(){format!("<button class='danger-text' data-action='disconnect' data-testid='disconnect'>{}</button>",if s.conn.as_ref().is_some_and(|c|c.hosting){"Остановить комнату"}else{"Выйти из комнаты"})}else{String::new()}),
             "sources"=>{let mut x="<span class='eyebrow'>ДЕМОНСТРАЦИЯ ЭКРАНА</span><h2>Что показать команде?</h2><p>Выберите экран или отдельное окно.</p><div class='sources'>".to_string();for src in &s.sources { x.push_str(&format!("<button class='source' data-action='select-source' data-id='{}' data-testid='source-{}'><img src='{}' alt=''/><strong>{}</strong></button>",esc(&src.id),esc(&src.id),esc(&src.thumbnail),esc(&src.name))); }x.push_str("</div><div class='modal-actions'><button data-action='close-modal'>Отмена</button></div>");x},
             _=>"<div class='brand-mark'>ϟ</div><h2>Spark</h2><p>Общение рядом. Чаты, голос, видео и файлы в вашей локальной сети.</p><div class='modal-actions'><button class='primary' data-action='close-modal'>Понятно</button></div>".into()
         };
@@ -1055,6 +1067,8 @@ fn action_handler(app: &AppRef, action: &str, id: &str, name: &str) {
                 }
             }
         }
+        "check-updates" => updates::action(app, false),
+        "install-update" => updates::action(app, true),
         "save-settings" => save_settings(app),
         "disconnect" => disconnect(app),
         "close-modal" => {

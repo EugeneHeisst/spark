@@ -151,6 +151,11 @@ test('preferences: themes, accent, native zoom, event audio, durable settings an
     expect(await app.evaluate(({ app }) => app.commandLine.hasSwitch('mute-audio'))).toBe(true);
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     await id(page, 'settings').click();
+    await expect(id(page, 'pref-updates')).toBeChecked();
+    await expect(id(page, 'updates-status')).toBeVisible();
+    const updateState = await page.evaluate(() => window.sparkDesktop.checkUpdates());
+    expect(updateState.state).toBe('unsupported');
+    await expect(id(page, 'check-updates')).toBeDisabled();
     await id(page, 'pref-theme').selectOption('light');
     await expect(page.locator('body')).toHaveCSS('background-color', 'rgb(244, 245, 248)');
     await id(page, 'pref-theme').selectOption('midnight');
@@ -213,8 +218,9 @@ test('preferences: themes, accent, native zoom, event audio, durable settings an
     await setPreference(page, 'pref-volume', 35);
     await id(page, 'pref-sounds').uncheck();
     await id(page, 'pref-tray').uncheck();
+    await id(page, 'pref-updates').uncheck();
     const saved = { theme: 'midnight', accent: '#5ca9ff', zoom: 125, sounds: false,
-      volume: 35, close_to_tray: false, compact: true };
+      volume: 35, close_to_tray: false, compact: true, auto_updates: false };
     await expect.poll(async () => {
       try { return JSON.parse(await fs.readFile(path.join(directory, 'preferences.json'), 'utf8')); }
       catch { return null; }
@@ -240,6 +246,7 @@ test('preferences: themes, accent, native zoom, event audio, durable settings an
     await expect(id(page, 'pref-volume')).toHaveValue('35');
     await expect(id(page, 'pref-sounds')).not.toBeChecked();
     await expect(id(page, 'pref-tray')).not.toBeChecked();
+    await expect(id(page, 'pref-updates')).not.toBeChecked();
     await expect(id(page, 'pref-compact')).toBeChecked();
     await id(page, 'settings-name').fill('Новое имя из настроек');
     await id(page, 'save-settings').click();
@@ -485,6 +492,16 @@ test('packaged application uses bundled Rust service and isolated renderer', asy
     await expect(id(page, 'display-name')).toBeVisible();
     expect(await page.evaluate(() => typeof window.require)).toBe('undefined');
     expect(await page.evaluate(() => typeof window.sparkDesktop.sources)).toBe('function');
+    const updateStatus = await page.evaluate(() => window.sparkDesktop.updateStatus());
+    expect(updateStatus.currentVersion).toBe(await app.evaluate(({ app }) => app.getVersion()));
+    expect(await page.evaluate(() => typeof window.sparkDesktop.checkUpdates)).toBe('function');
+    const blocked = await page.evaluate(async () => {
+      try { await window.sparkDesktop.installUpdate({ inCall: true, transferring: false, hosting: false }); return false; }
+      catch (error) { return error.message.includes('звонок'); }
+      finally { await window.sparkDesktop.setActivity({ inCall: false, transferring: false, hosting: false }); }
+    });
+    expect(blocked).toBe(true);
+    expect(await page.evaluate(async () => (await fetch('/api/bootstrap')).ok)).toBe(true);
     // The unpackaged-only synthetic input flags are ignored in a real package.
     expect(await app.evaluate(({ app }) => app.commandLine.hasSwitch('use-fake-device-for-media-stream'))).toBe(false);
     await connect(page, 'Проверка пакета', true);

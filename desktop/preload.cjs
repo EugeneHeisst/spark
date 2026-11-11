@@ -1,6 +1,11 @@
 'use strict';
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('sparkDesktop', Object.freeze({
+  updateStatus: () => ipcRenderer.invoke('spark:update-status'),
+  checkUpdates: () => ipcRenderer.invoke('spark:check-updates'),
+  installUpdate: activity => ipcRenderer.invoke('spark:install-update', activity),
+  setActivity: activity => ipcRenderer.invoke('spark:activity', activity),
+  ready: () => ipcRenderer.invoke('spark:ready'),
   getSettings: () => ipcRenderer.invoke('spark:get-settings'),
   setSettings: value => ipcRenderer.invoke('spark:set-settings', value),
   quit: () => ipcRenderer.invoke('spark:quit'),
