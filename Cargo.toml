@@ -19,3 +19,5 @@ spark-protocol = { path = "crates/spark-protocol" }
 lto = "thin"
 strip = true
 
+[profile.release.package.spark-ui]
+strip = "debuginfo"

@@ -28,10 +28,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Linux desktop libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 libxss1 libxtst6 xvfb
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 libxss1 libxtst6 xvfb openbox dbus-x11
       - run: npm ci --no-audit --no-fund
       - name: Rust tests (real sockets and disk)
         run: cargo test --locked -p spark-protocol -p spark-service
+      - name: Rust source checks
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked -p spark-protocol -p spark-service --all-targets -- -D warnings
       - name: Rust WebAssembly type check
         run: cargo check --locked -p spark-ui --target wasm32-unknown-unknown
       - name: WebAssembly bindings compiler
@@ -39,7 +43,7 @@ jobs:
       - run: npm run build
       - name: Two desktop clients on an isolated display
         if: runner.os == 'Linux'
-        run: xvfb-run -a -s '-screen 0 1600x1000x24' npm run test:e2e
+        run: npm run test:e2e:linux
       - name: Two Windows desktop clients (synthetic input devices)
         if: runner.os == 'Windows'
         run: npm run test:e2e

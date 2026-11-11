@@ -23,6 +23,8 @@ let boot;
 let quitting = false;
 const sourcesByContents = new Map();
 const approvedSources = new Map();
+const wayland = process.platform === 'linux' && (process.env.XDG_SESSION_TYPE === 'wayland'
+  || (!process.env.XDG_SESSION_TYPE && !!process.env.WAYLAND_DISPLAY));
 const ownOrigin = () => boot ? new URL(boot.url).origin : '';
 const trustedUrl = url => {
   try { return new URL(url).origin === ownOrigin(); } catch { return false; }
@@ -116,6 +118,14 @@ function installIpc() {
   ipcMain.handle('spark:version', event => { trustedIpc(event); return app.getVersion(); });
   ipcMain.handle('spark:sources', async event => {
     trustedIpc(event);
+    // Enumerating PipeWire sources opens the portal itself. Request the portal
+    // once at getDisplayMedia instead of selecting the source twice on Wayland.
+    if (wayland) {
+      const source = { id: 'screen:0:0', name: 'Выбрать окно или экран в системе' };
+      sourcesByContents.set(event.sender.id, { at: Date.now(), sources: [source] });
+      const icon = fs.readFileSync(path.join(servicePaths().assets, 'spark.svg'), 'utf8');
+      return [{ ...source, thumbnail: 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(icon) }];
+    }
     const sources = await desktopCapturer.getSources({ types: ['screen', 'window'],
       thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: false });
     sourcesByContents.set(event.sender.id, { at: Date.now(), sources });
@@ -175,7 +185,7 @@ else {
       mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       mainWindow.webContents.on('will-navigate', (event, url) => { if (!trustedUrl(url)) event.preventDefault(); });
       mainWindow.once('ready-to-show', () => mainWindow.show());
-      mainWindow.webContents.on('destroyed', () => sourcesByContents.clear());
+      mainWindow.webContents.on('destroyed', () => { sourcesByContents.clear(); approvedSources.clear(); });
       await mainWindow.loadURL(boot.url);
     } catch (error) {
       dialog.showErrorBox('Не удалось запустить Spark', error.message);

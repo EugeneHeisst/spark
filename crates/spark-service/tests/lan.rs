@@ -479,3 +479,62 @@ async fn two_clients_chat_signaling_stale_reconnect_files_save_and_restart() {
     drop(ws);
     restarted.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_the_sender_socket_cancels_an_unfinished_upload_and_removes_temporary_bytes() {
+    let a_root = TempDir::new().unwrap();
+    let b_root = TempDir::new().unwrap();
+    let a = start(a_root.path()).await;
+    let b = start(b_root.path()).await;
+    let client = client();
+    let info = host(&client, &a).await;
+    join(&client, &b, &info).await;
+    let mut ws = socket(&b).await;
+    welcome(&mut ws).await;
+    let stream =
+        futures_util::stream::once(async { Ok::<_, std::io::Error>(vec![0x55u8; 128 * 1024]) })
+            .chain(futures_util::stream::pending());
+    let request = post(
+        &client,
+        &b,
+        "/api/upload?channel_id=general&name=unfinished.bin",
+    )
+    .body(reqwest::Body::wrap_stream(stream));
+    let upload = tokio::spawn(async move { request.send().await });
+    let files = a_root.path().join("host/files");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if std::fs::read_dir(&files)
+                .unwrap()
+                .any(|entry| entry.unwrap().metadata().unwrap().len() > 0)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("upload did not reach host");
+    ws.close(None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if std::fs::read_dir(&files).unwrap().next().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("partial upload was not removed after disconnect");
+    upload.abort();
+    let mut ws = socket(&b).await;
+    match welcome(&mut ws).await {
+        ServerEvent::Welcome { messages, .. } => {
+            assert!(messages.iter().all(|message| message.file.is_none()))
+        }
+        _ => unreachable!(),
+    }
+    drop(ws);
+    b.shutdown().await;
+    a.shutdown().await;
+}

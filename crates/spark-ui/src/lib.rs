@@ -264,49 +264,47 @@ fn render_onboarding(app: &AppRef) {
     if hosts.is_empty() {
         hosts = "<div class='discovery-empty'><span class='signal-icon'>⌁</span>Пока нет доступных комнат<small>Создайте свою или введите адрес вручную</small></div>".into();
     }
-    html(
-        "spark",
-        &format!(
-            r#"<div class="onboarding"><div class="onboard-info"><div class="brand-lockup"><div class="brand-mark">ϟ</div><span>Spark<span class="wordmark-dot">.</span></span></div><div class="eyebrow"><span class="status-dot"></span> ВАША СЕТЬ. ВАШЕ ПРОСТРАНСТВО.</div><h1>Ближе,<br/>чем кажется<span>.</span></h1><p class="lead">Всё, что нужно для общения.<br/>Прямо в вашей локальной сети.</p><div class="feature-pills"><span>◉ Голос и видео</span><span>▱ Общий экран</span><span>↗ Файлы</span></div><div class="local-note"><span>⌁</span><p><strong>Без облака и регистрации</strong><br/>Один компьютер создаёт комнату.<br/>Остальные подключаются по локальной сети.</p></div><footer>Spark <span>v{version} · Linux / Windows</span></footer></div><section class="onboard-card"><div class="card-heading"><span class="eyebrow">НАЧНЁМ ОБЩЕНИЕ</span><h2>Ваше место в сети</h2><p>Укажите имя и подключитесь к своей команде.</p></div><label class="field">Как вас называть<input id="display-name" data-field="name" data-testid="display-name" autocomplete="nickname" maxlength="64" value="{name}" placeholder="Ваше имя"/></label><div class="tabs"><button class="{join_class}" data-action="mode-join" data-testid="join-tab">Подключиться</button><button class="{host_class}" data-action="mode-host" data-testid="host-tab">Создать комнату</button></div>{fields}<label class="field">Код комнаты<input id="room-code" data-field="code" data-testid="room-code" type="password" minlength="6" maxlength="128" value="{code}" placeholder="Не менее 6 символов" autocomplete="off"/></label><p class="field-help">{help}</p><button class="primary wide" data-action="connect" data-testid="connect" {disabled}>{button}<span>→</span></button>{discovery}<p class="trust-note">Чаты и файлы проходят через создателя комнаты.<br/>Используйте Spark в доверенной локальной сети.</p></section></div><div id="overlay"></div>"#,
-            version = esc(&s.version),
-            name = esc(&s.form.name),
-            code = esc(&s.form.code),
-            join_class = if host { "" } else { "active" },
-            host_class = if host { "active" } else { "" },
-            fields = if host {
-                format!(
-                    "<label class='field'>Название комнаты<input data-field='room' data-testid='room-name' maxlength='64' value='{}' placeholder='Например: Команда дома'/></label>",
-                    esc(&s.form.room)
-                )
-            } else {
-                format!(
-                    "<label class='field'>Адрес комнаты<input data-field='address' data-testid='room-address' value='{}' placeholder='192.168.1.10:39393' autocomplete='off'/></label>",
-                    esc(&s.form.address)
-                )
-            },
-            help = if host {
-                "Передайте код людям, которых хотите пригласить."
-            } else {
-                "Попросите адрес и код у создателя комнаты."
-            },
-            disabled = if s.busy { "disabled" } else { "" },
-            button = if s.busy {
-                "Подключаемся…"
-            } else if host {
-                "Создать комнату"
-            } else {
-                "Войти в комнату"
-            },
-            discovery = if host {
-                String::new()
-            } else {
-                format!(
-                    "<div class='discovery-title'><span>КОМНАТЫ ПОБЛИЗОСТИ</span><button data-action='refresh' title='Обновить комнаты' data-testid='refresh-discovery'>↻</button></div>{hosts}"
-                )
-            }
-        ),
+    let content = format!(
+        r#"<div class="onboarding"><div class="onboard-info"><div class="brand-lockup"><div class="brand-mark">ϟ</div><span>Spark<span class="wordmark-dot">.</span></span></div><div class="eyebrow"><span class="status-dot"></span> ВАША СЕТЬ. ВАШЕ ПРОСТРАНСТВО.</div><h1>Ближе,<br/>чем кажется<span>.</span></h1><p class="lead">Всё, что нужно для общения.<br/>Прямо в вашей локальной сети.</p><div class="feature-pills"><span>◉ Голос и видео</span><span>▱ Общий экран</span><span>↗ Файлы</span></div><div class="local-note"><span>⌁</span><p><strong>Без облака и регистрации</strong><br/>Один компьютер создаёт комнату.<br/>Остальные подключаются по локальной сети.</p></div><footer>Spark <span>v{version} · Linux / Windows</span></footer></div><section class="onboard-card"><div class="card-heading"><span class="eyebrow">НАЧНЁМ ОБЩЕНИЕ</span><h2>Ваше место в сети</h2><p>Укажите имя и подключитесь к своей команде.</p></div><label class="field">Как вас называть<input id="display-name" data-field="name" data-testid="display-name" autocomplete="nickname" maxlength="64" value="{name}" placeholder="Ваше имя"/></label><div class="tabs"><button class="{join_class}" data-action="mode-join" data-testid="join-tab">Подключиться</button><button class="{host_class}" data-action="mode-host" data-testid="host-tab">Создать комнату</button></div>{fields}<label class="field">Код комнаты<input id="room-code" data-field="code" data-testid="room-code" type="password" minlength="6" maxlength="128" value="{code}" placeholder="Не менее 6 символов" autocomplete="off"/></label><p class="field-help">{help}</p><button class="primary wide" data-action="connect" data-testid="connect" {disabled}>{button}<span>→</span></button>{discovery}<p class="trust-note">Чаты и файлы проходят через создателя комнаты.<br/>Используйте Spark в доверенной локальной сети.</p></section></div><div id="overlay"></div>"#,
+        version = esc(&s.version),
+        name = esc(&s.form.name),
+        code = esc(&s.form.code),
+        join_class = if host { "" } else { "active" },
+        host_class = if host { "active" } else { "" },
+        fields = if host {
+            format!(
+                "<label class='field'>Название комнаты<input data-field='room' data-testid='room-name' maxlength='64' value='{}' placeholder='Например: Команда дома'/></label>",
+                esc(&s.form.room)
+            )
+        } else {
+            format!(
+                "<label class='field'>Адрес комнаты<input data-field='address' data-testid='room-address' value='{}' placeholder='192.168.1.10:39393' autocomplete='off'/></label>",
+                esc(&s.form.address)
+            )
+        },
+        help = if host {
+            "Передайте код людям, которых хотите пригласить."
+        } else {
+            "Попросите адрес и код у создателя комнаты."
+        },
+        disabled = if s.busy { "disabled" } else { "" },
+        button = if s.busy {
+            "Подключаемся…"
+        } else if host {
+            "Создать комнату"
+        } else {
+            "Войти в комнату"
+        },
+        discovery = if host {
+            String::new()
+        } else {
+            format!(
+                "<div class='discovery-title'><span>КОМНАТЫ ПОБЛИЗОСТИ</span><button data-action='refresh' title='Обновить комнаты' data-testid='refresh-discovery'>↻</button></div>{hosts}"
+            )
+        }
     );
     drop(s);
+    html("spark", &content);
     render_overlay(app);
 }
 
@@ -337,29 +335,28 @@ fn render_sidebar(app: &AppRef) {
         }
     }
     let profile = s.profile.as_ref();
-    html(
-        "sidebar",
-        &format!(
-            "<div class='server-heading'><div><span class='eyebrow'>ЛОКАЛЬНОЕ ПРОСТРАНСТВО</span><h2>{}</h2></div><span class='server-chevron'>⌄</span></div><div class='network-badge'><span class='status-dot {}'></span><span>{}</span></div><div class='channels'>{channels}<div class='sidebar-tip'><span>ϟ</span><p>Идеи становятся ближе,<br/>когда вы на одной волне.</p></div></div><div class='server-address'><span>⌁ {}</span><button data-action='settings' title='Адрес и настройки'>ⓘ</button></div><div class='user-bar'><span class='avatar self'>{}</span><div><strong>{}</strong><small>{}</small></div><button data-action='settings' title='Настройки' data-testid='settings'>⚙</button></div>",
-            esc(&conn.server_name),
-            if s.reconnecting { "pending" } else { "" },
-            if s.reconnecting {
-                "Переподключаемся…"
-            } else if conn.hosting {
-                "Вы создали эту комнату"
-            } else {
-                "Соединение по LAN"
-            },
-            esc(&conn.address),
-            profile.map(|p| initial(&p.name)).unwrap_or_default(),
-            profile.map(|p| esc(&p.name)).unwrap_or_default(),
-            if s.media_state.channel_id.is_some() {
-                "В голосовом канале"
-            } else {
-                "В сети"
-            }
-        ),
+    let content = format!(
+        "<div class='server-heading'><div><span class='eyebrow'>ЛОКАЛЬНОЕ ПРОСТРАНСТВО</span><h2>{}</h2></div><span class='server-chevron'>⌄</span></div><div class='network-badge'><span class='status-dot {}'></span><span>{}</span></div><div class='channels'>{channels}<div class='sidebar-tip'><span>ϟ</span><p>Идеи становятся ближе,<br/>когда вы на одной волне.</p></div></div><div class='server-address'><span>⌁ {}</span><button data-action='settings' title='Адрес и настройки'>ⓘ</button></div><div class='user-bar'><span class='avatar self'>{}</span><div><strong>{}</strong><small>{}</small></div><button data-action='settings' title='Настройки' data-testid='settings'>⚙</button></div>",
+        esc(&conn.server_name),
+        if s.reconnecting { "pending" } else { "" },
+        if s.reconnecting {
+            "Переподключаемся…"
+        } else if conn.hosting {
+            "Вы создали эту комнату"
+        } else {
+            "Соединение по LAN"
+        },
+        esc(&conn.address),
+        profile.map(|p| initial(&p.name)).unwrap_or_default(),
+        profile.map(|p| esc(&p.name)).unwrap_or_default(),
+        if s.media_state.channel_id.is_some() {
+            "В голосовом канале"
+        } else {
+            "В сети"
+        }
     );
+    drop(s);
+    html("sidebar", &content);
 }
 fn render_header(app: &AppRef) {
     let s = app.borrow();
@@ -369,19 +366,18 @@ fn render_header(app: &AppRef) {
         .find(|c| c.id == s.selected)
         .map(|c| c.name.as_str())
         .unwrap_or("Чат");
-    html(
-        "chat-header",
-        &format!(
-            "<div class='channel-title'><span>#</span><h1>{}</h1><i></i><p>Место, где начинается разговор</p></div><div class='header-actions'><span class='connection-label'><span class='status-dot {}'></span>{}</span><button data-action='settings' title='Настройки комнаты'>ⓘ</button></div>",
-            esc(name),
-            if s.reconnecting { "pending" } else { "" },
-            if s.reconnecting {
-                "Нет соединения"
-            } else {
-                "В локальной сети"
-            }
-        ),
+    let content = format!(
+        "<div class='channel-title'><span>#</span><h1>{}</h1><i></i><p>Место, где начинается разговор</p></div><div class='header-actions'><span class='connection-label'><span class='status-dot {}'></span>{}</span><button data-action='settings' title='Настройки комнаты'>ⓘ</button></div>",
+        esc(name),
+        if s.reconnecting { "pending" } else { "" },
+        if s.reconnecting {
+            "Нет соединения"
+        } else {
+            "В локальной сети"
+        }
     );
+    drop(s);
+    html("chat-header", &content);
 }
 fn render_messages(app: &AppRef, bottom: bool) {
     let s = app.borrow();
@@ -420,6 +416,7 @@ fn render_messages(app: &AppRef, bottom: bool) {
         }
         out.push_str(&format!("<article class='message' data-testid='message-{}'><span class='avatar {}'>{}</span><div class='message-body'><div class='message-meta'><strong>{}</strong>{}<time>{}</time></div><p>{}</p>{attachment}</div></article>",esc(&m.id),if mine {"self"} else {""},initial(&m.sender_name),esc(&m.sender_name),if mine {"<span class='you-label'>ВЫ</span>"} else {""},time(m.created_at),esc(&m.text).replace('\n',"<br/>")));
     }
+    drop(s);
     html("message-list", &out);
     if let Some(e) = element("message-list") {
         if bottom || old.1 - old.0 - old.2 < 100 {
@@ -449,21 +446,20 @@ fn render_composer(app: &AppRef) {
         .map(|c| c.name.as_str())
         .unwrap_or("чат");
     let upload=s.upload.as_ref().map(|u|format!("<div class='upload-status' data-testid='upload-progress'><span id='upload-label'>↑ {} · {}%</span><button data-action='cancel-upload' title='Отменить'>×</button><progress id='upload-meter' max='100' value='{}'></progress></div>",esc(&u.name),u.percent,u.percent)).unwrap_or_default();
-    html(
-        "composer",
-        &format!(
-            "{upload}<div class='composer'><button class='attach-button' data-action='attach' data-testid='attach-file' title='Прикрепить файл' {}>+</button><textarea id='message-input' data-testid='message-input' data-field='draft' rows='1' maxlength='8000' placeholder='Написать в #{}' {}>{}</textarea><button class='send-button' data-action='send' data-testid='send-message' title='Отправить сообщение' {}>➤</button></div><div class='composer-help'><span><kbd>Enter</kbd> отправить <span>·</span> <kbd>Shift + Enter</kbd> новая строка</span><span>Всё остаётся в вашей сети <span class='mini-spark'>ϟ</span></span></div>",
-            if s.upload.is_some() || s.reconnecting {
-                "disabled"
-            } else {
-                ""
-            },
-            esc(name),
-            if s.reconnecting { "disabled" } else { "" },
-            esc(&s.draft),
-            if s.reconnecting { "disabled" } else { "" }
-        ),
+    let content = format!(
+        "{upload}<div class='composer'><button class='attach-button' data-action='attach' data-testid='attach-file' title='Прикрепить файл' {}>+</button><textarea id='message-input' data-testid='message-input' data-field='draft' rows='1' maxlength='8000' placeholder='Написать в #{}' {}>{}</textarea><button class='send-button' data-action='send' data-testid='send-message' title='Отправить сообщение' {}>➤</button></div><div class='composer-help'><span><kbd>Enter</kbd> отправить <span>·</span> <kbd>Shift + Enter</kbd> новая строка</span><span>Всё остаётся в вашей сети <span class='mini-spark'>ϟ</span></span></div>",
+        if s.upload.is_some() || s.reconnecting {
+            "disabled"
+        } else {
+            ""
+        },
+        esc(name),
+        if s.reconnecting { "disabled" } else { "" },
+        esc(&s.draft),
+        if s.reconnecting { "disabled" } else { "" }
     );
+    drop(s);
+    html("composer", &content);
     if focused {
         if let Some(e) =
             element("message-input").and_then(|e| e.dyn_into::<HtmlTextAreaElement>().ok())
@@ -486,6 +482,7 @@ fn render_members(app: &AppRef) {
         out.push_str(&format!("<div class='member'><span class='avatar {}'>{}<i></i></span><div><strong>{}{}</strong><small>{}</small></div>{}</div>",if mine {"self"} else {""},initial(&p.name),esc(&p.name),if mine {" <em>вы</em>"} else {""},if p.screen {"Демонстрирует экран"} else if p.camera {"Камера включена"} else if p.voice_channel.is_some() {"В голосовом канале"} else {"В сети"},if mine {String::new()} else {format!("<button data-action='invite' data-id='{}' title='Пригласить в звонок' data-testid='invite-{}'>◖</button>",esc(&p.id),esc(&p.id))}));
     }
     out.push_str("<div class='members-note'><span>⌁</span><strong>Вместе в одной сети</strong><p>Для общения интернет<br/>не требуется.</p></div>");
+    drop(s);
     html("members", &out);
 }
 
@@ -499,8 +496,18 @@ fn connection_label(state: &str) -> &str {
     }
 }
 fn render_voice(app: &AppRef) {
-    let s = app.borrow();
-    let Some(channel) = &s.media_state.channel_id else {
+    let (media_state, channels, peers, streams, connections, profile) = {
+        let s = app.borrow();
+        (
+            s.media_state.clone(),
+            s.channels.clone(),
+            s.peers.clone(),
+            s.streams.clone(),
+            s.connections.clone(),
+            s.profile.clone(),
+        )
+    };
+    let Some(channel) = &media_state.channel_id else {
         html("voice-panel", "");
         return;
     };
@@ -510,8 +517,7 @@ fn render_voice(app: &AppRef) {
             "<div id='call-heading' class='voice-heading'></div><div id='call-grid' class='video-grid'></div><div id='call-audio'></div><div id='call-controls' class='call-controls'></div>",
         );
     }
-    let name = s
-        .channels
+    let name = channels
         .iter()
         .find(|c| &c.id == channel)
         .map(|c| c.name.as_str())
@@ -527,21 +533,21 @@ fn render_voice(app: &AppRef) {
         "call-controls",
         &format!(
             "<button class='{}' data-action='mute' title='Микрофон' data-testid='mute'><span>{}</span><small>{}</small></button><button class='{}' data-action='deafen' title='Звук' data-testid='deafen'><span>♬</span><small>{}</small></button><button class='{}' data-action='camera' title='Камера' data-testid='camera'><span>▣</span><small>Камера</small></button><button class='{}' data-action='screen' title='Демонстрация экрана' data-testid='screen'><span>▱</span><small>Экран</small></button><button class='end-call' data-action='leave-voice' title='Завершить звонок' data-testid='leave-voice'><span>⌁</span><small>Выйти</small></button>",
-            if s.media_state.muted { "off" } else { "" },
-            if s.media_state.muted { "♩̸" } else { "♩" },
-            if s.media_state.muted {
+            if media_state.muted { "off" } else { "" },
+            if media_state.muted { "♩̸" } else { "♩" },
+            if media_state.muted {
                 "Выключен"
             } else {
                 "Микрофон"
             },
-            if s.media_state.deafened { "off" } else { "" },
-            if s.media_state.deafened {
+            if media_state.deafened { "off" } else { "" },
+            if media_state.deafened {
                 "Без звука"
             } else {
                 "Звук"
             },
-            if s.media_state.camera { "on" } else { "" },
-            if s.media_state.screen { "on" } else { "" }
+            if media_state.camera { "on" } else { "" },
+            if media_state.screen { "on" } else { "" }
         ),
     );
     // Media elements survive state/presence updates. Reassigning srcObject restarts
@@ -554,13 +560,13 @@ fn render_voice(app: &AppRef) {
             {
                 let peer = el.get_attribute("data-peer").unwrap_or_default();
                 let kind = el.get_attribute("data-kind").unwrap_or_default();
-                if !s.streams.contains_key(&(peer, kind)) {
+                if !streams.contains_key(&(peer, kind)) {
                     el.remove();
                 }
             }
         }
     }
-    let videos = s.streams.keys().any(|(_, kind)| kind != "audio");
+    let videos = streams.keys().any(|(_, kind)| kind != "audio");
     if videos {
         if let Some(el) = element("audio-avatars") {
             el.remove();
@@ -574,13 +580,12 @@ fn render_voice(app: &AppRef) {
             }
         }
         let mut avatars = String::new();
-        for p in s
-            .peers
+        for p in peers
             .iter()
             .filter(|p| p.voice_channel.as_deref() == Some(channel.as_str()))
         {
-            let state = s.connections.get(&p.id).map(String::as_str).unwrap_or(
-                if s.profile.as_ref().is_some_and(|x| x.id == p.id) {
+            let state = connections.get(&p.id).map(String::as_str).unwrap_or(
+                if profile.as_ref().is_some_and(|x| x.id == p.id) {
                     "local"
                 } else {
                     "new"
@@ -590,7 +595,7 @@ fn render_voice(app: &AppRef) {
         }
         html("audio-avatars", &avatars);
     }
-    for ((peer, kind), stream) in &s.streams {
+    for ((peer, kind), stream) in &streams {
         if kind == "audio" && peer == "local" {
             continue;
         }
@@ -619,7 +624,7 @@ fn render_voice(app: &AppRef) {
                 let name = if peer == "local" {
                     "Вы"
                 } else {
-                    s.peers
+                    peers
                         .iter()
                         .find(|p| &p.id == peer)
                         .map(|p| p.name.as_str())
@@ -635,7 +640,7 @@ fn render_voice(app: &AppRef) {
             let state = if peer == "local" {
                 "local"
             } else {
-                s.connections.get(peer).map(String::as_str).unwrap_or("new")
+                connections.get(peer).map(String::as_str).unwrap_or("new")
             };
             el.set_text_content(Some(connection_label(state)));
             // A peer can have camera and screen: one connection test marker per tile.
@@ -701,6 +706,7 @@ fn render_overlay(app: &AppRef) {
         };
         out.push_str(&format!("<div class='modal-shade'><section class='modal'><button class='modal-close' data-action='close-modal' title='Закрыть'>×</button>{content}</section></div>"));
     }
+    drop(s);
     html("overlay", &out);
 }
 
@@ -774,8 +780,9 @@ fn install_events(app: &AppRef) {
     });
     root.add_event_listener_with_callback("input", input.as_ref().unchecked_ref())
         .expect("input");
-    root.add_event_listener_with_callback("change", input.as_ref().unchecked_ref())
-        .expect("change");
+    // Chromium fires `change` synchronously when a focused input is detached.
+    // `input` already covers typing, paste and selects, without re-entering App
+    // while a renderer replaces a subtree. File selection has its own listener.
     input.forget();
     let a = app.clone();
     let key =

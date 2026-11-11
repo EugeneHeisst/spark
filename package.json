@@ -6,12 +6,14 @@
   "author": "EugeneHeisst",
   "license": "MIT",
   "main": "desktop/main.cjs",
+  "desktopName": "dev.eugeneheisst.spark.desktop",
   "scripts": {
     "postinstall": "node node_modules/electron/install.js",
     "build": "node scripts/build.mjs",
     "start": "electron .",
     "dev": "node scripts/build.mjs && electron .",
     "test:e2e": "playwright test",
+    "test:e2e:linux": "node scripts/test-linux.mjs",
     "package:linux": "electron-builder --linux AppImage tar.gz --x64",
     "package:win": "electron-builder --win nsis zip --x64"
   },
@@ -32,6 +34,7 @@
       { "from": "assets", "to": "ui", "filter": ["**/*"] }
     ],
     "linux": {
+      "syncDesktopName": true,
       "category": "Network;InstantMessaging;",
       "icon": "assets/icon.png",
       "artifactName": "Spark-${version}-linux-${arch}.${ext}",

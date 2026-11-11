@@ -187,8 +187,12 @@ impl Service {
     pub async fn shutdown(mut self) {
         self.state.stop.cancel();
         self.state.disconnect_active().await;
-        if let Some(task) = self.task.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+        if let Some(mut task) = self.task.take()
+            && tokio::time::timeout(Duration::from_secs(5), &mut task)
+                .await
+                .is_err()
+        {
+            task.abort();
         }
     }
 }
@@ -553,10 +557,12 @@ async fn proxy_events(state: Arc<GatewayState>, config: ActiveConfig, mut socket
             let event = ServerEvent::Disconnected {
                 reason: format!("Не удалось подключиться к комнате: {reason}"),
             };
-            let _ = socket
-                .send(Message::Text(serde_json::to_string(&event).unwrap().into()))
-                .await;
-            let _ = socket.close().await;
+            let _ = send_ws(
+                &mut socket,
+                Message::Text(serde_json::to_string(&event).unwrap().into()),
+            )
+            .await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), socket.close()).await;
             let mut session = state.session.lock().await;
             if session.as_ref().is_some_and(|s| s.id == session_id) {
                 *session = None;
@@ -580,24 +586,28 @@ async fn proxy_events(state: Arc<GatewayState>, config: ActiveConfig, mut socket
     let (mut remote_tx, mut remote_rx) = remote.split();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     let mut last_local = Instant::now();
+    let mut last_remote = Instant::now();
     let reason = loop {
         tokio::select! {
             _=state.stop.cancelled()=>break "Сервис завершает работу".to_owned(),
             _=stop.cancelled()=>break "Подключение заменено или закрыто".to_owned(),
             _=heartbeat.tick()=>{
                 if last_local.elapsed()>Duration::from_secs(60) {break "Локальное соединение потеряно".into();}
-                if local_tx.send(Message::Ping(Vec::new().into())).await.is_err(){break "Локальное соединение закрыто".into();}
+                if last_remote.elapsed()>Duration::from_secs(60) {break "Соединение с комнатой потеряно".into();}
+                if !send_ws(&mut local_tx,Message::Ping(Vec::new().into())).await {break "Локальное соединение закрыто".into();}
+                if !send_ws(&mut remote_tx,tungstenite::Message::Ping(Vec::new().into())).await {break "Соединение с комнатой потеряно".into();}
             }
             incoming=local_rx.next()=>match incoming {
-                Some(Ok(Message::Text(text)))=>{last_local=Instant::now();if remote_tx.send(tungstenite::Message::Text(text.as_str().to_owned().into())).await.is_err(){break "Соединение с комнатой потеряно".into();}}
+                Some(Ok(Message::Text(text)))=>{last_local=Instant::now();if !send_ws(&mut remote_tx,tungstenite::Message::Text(text.as_str().to_owned().into())).await {break "Соединение с комнатой потеряно".into();}}
                 Some(Ok(Message::Pong(_)))=>last_local=Instant::now(),
-                Some(Ok(Message::Ping(data)))=>{if local_tx.send(Message::Pong(data)).await.is_err(){break "Локальное соединение закрыто".into();}}
+                Some(Ok(Message::Ping(data)))=>{last_local=Instant::now();if !send_ws(&mut local_tx,Message::Pong(data)).await {break "Локальное соединение закрыто".into();}}
                 Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break "Локальное соединение закрыто".into(),
                 _=>{}
             },
             incoming=remote_rx.next()=>match incoming {
-                Some(Ok(tungstenite::Message::Text(text)))=>{if local_tx.send(Message::Text(text.as_str().to_owned().into())).await.is_err(){break "Локальное соединение закрыто".into();}}
-                Some(Ok(tungstenite::Message::Ping(data)))=>{if remote_tx.send(tungstenite::Message::Pong(data)).await.is_err(){break "Соединение с комнатой потеряно".into();}}
+                Some(Ok(tungstenite::Message::Text(text)))=>{last_remote=Instant::now();if !send_ws(&mut local_tx,Message::Text(text.as_str().to_owned().into())).await {break "Локальное соединение закрыто".into();}}
+                Some(Ok(tungstenite::Message::Ping(data)))=>{last_remote=Instant::now();if !send_ws(&mut remote_tx,tungstenite::Message::Pong(data)).await {break "Соединение с комнатой потеряно".into();}}
+                Some(Ok(tungstenite::Message::Pong(_)))=>last_remote=Instant::now(),
                 Some(Ok(tungstenite::Message::Close(_)))|None|Some(Err(_))=>break "Соединение с комнатой потеряно".into(),
                 _=>{}
             }
@@ -724,7 +734,12 @@ async fn download(
                 .header("x-spark-key", &config.key),
         )
         .await?;
-    let mut output = Body::from_stream(response.bytes_stream()).into_response();
+    let mut output = Body::from_stream(
+        response
+            .bytes_stream()
+            .take_until(state.stop.clone().cancelled_owned()),
+    )
+    .into_response();
     output.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_str(&validation::mime(&info.mime)).map_err(ApiError::internal)?,
@@ -800,7 +815,11 @@ async fn save(
         .await?;
     let mut hash = Sha256::new();
     let mut bytes = 0u64;
-    let mut stream = response.bytes_stream();
+    let mut stream = Box::pin(
+        response
+            .bytes_stream()
+            .take_until(state.stop.clone().cancelled_owned()),
+    );
     while let Some(chunk) = tokio::time::timeout(Duration::from_secs(60), stream.next())
         .await
         .map_err(|_| ApiError::bad("Превышено время ожидания скачивания"))?
@@ -826,17 +845,16 @@ async fn save(
     if request.overwrite {
         tokio::fs::rename(&temporary.path, &path).await?;
     } else {
-        // A hard link atomically fails if the destination appeared after the dialog.
-        tokio::fs::hard_link(&temporary.path, &path)
-            .await
+        // Uses a no-replace rename on Windows/Linux, including volumes without hard links.
+        tempfile::TempPath::try_from_path(temporary.path.clone())?
+            .persist_noclobber(&path)
             .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                if e.error.kind() == std::io::ErrorKind::AlreadyExists {
                     ApiError::new(StatusCode::CONFLICT, "Файл уже существует")
                 } else {
-                    ApiError::from(e)
+                    ApiError::from(e.error)
                 }
             })?;
-        tokio::fs::remove_file(&temporary.path).await?;
     }
     temporary.armed = false;
     Ok(Json(
@@ -895,4 +913,15 @@ async fn remote_json<T: serde::de::DeserializeOwned>(response: reqwest::Response
     }
     serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_GATEWAY, "Некорректный JSON-ответ сервера"))
+}
+
+pub(crate) async fn send_ws<S, M>(sink: &mut S, message: M) -> bool
+where
+    S: futures_util::Sink<M> + Unpin,
+    M: Send,
+{
+    matches!(
+        tokio::time::timeout(Duration::from_secs(10), sink.send(message)).await,
+        Ok(Ok(()))
+    )
 }

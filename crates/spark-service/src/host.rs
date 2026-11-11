@@ -163,6 +163,24 @@ impl HostState {
             .map(|p| p.peer.clone())
             .ok_or_else(ApiError::unauthorized)
     }
+    async fn transfer_cancel(&self, headers: &HeaderMap) -> ApiResult<CancellationToken> {
+        self.authorize(headers)?;
+        let id = headers
+            .get("x-spark-peer")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let session = headers
+            .get("x-spark-session")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        self.peers
+            .lock()
+            .await
+            .get(id)
+            .filter(|peer| validation::equal_secret(&peer.session, session))
+            .map(|peer| peer.cancel.child_token())
+            .ok_or_else(ApiError::unauthorized)
+    }
     async fn broadcast(&self, event: ServerEvent, except: Option<&str>) {
         let peers = self.peers.lock().await;
         for (id, connected) in peers.iter() {
@@ -175,10 +193,10 @@ impl HostState {
         }
     }
     async fn send(&self, id: &str, event: ServerEvent) {
-        if let Some(peer) = self.peers.lock().await.get(id) {
-            if peer.tx.try_send(event).is_err() {
-                peer.cancel.cancel();
-            }
+        if let Some(peer) = self.peers.lock().await.get(id)
+            && peer.tx.try_send(event).is_err()
+        {
+            peer.cancel.cancel();
         }
     }
     pub async fn peer_count(&self) -> usize {
@@ -435,7 +453,7 @@ async fn host_socket(
             _=cancel.cancelled()=>break,
             _=heartbeat.tick()=>{
                 if last_seen.elapsed()>Duration::from_secs(60) { break; }
-                if writer.send(Message::Ping(Vec::new().into())).await.is_err() { break; }
+                if !crate::gateway::send_ws(&mut writer,Message::Ping(Vec::new().into())).await { break; }
             }
             Some(event)=rx.recv()=>{
                 let Ok(json)=serde_json::to_string(&event) else { break; };
@@ -455,13 +473,14 @@ async fn host_socket(
                         if let Err(e)=result { let _=tx.try_send(ServerEvent::Error { code:e.status.as_u16().to_string(),message:e.message }); }
                     }
                     Some(Ok(Message::Pong(_)))=>last_seen=Instant::now(),
-                    Some(Ok(Message::Ping(data)))=>{ if writer.send(Message::Pong(data)).await.is_err() { break; } }
+                    Some(Ok(Message::Ping(data)))=>{ last_seen=Instant::now();if !crate::gateway::send_ws(&mut writer,Message::Pong(data)).await { break; } }
                     Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,
                     _=>{}
                 }
             }
         }
     }
+    cancel.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(1), writer.close()).await;
     host.remove(&id, &session).await;
 }
@@ -486,6 +505,7 @@ async fn upload(
     body: Body,
 ) -> ApiResult<Json<ChatMessage>> {
     let sender = host.identity(&headers).await?;
+    let transfer_cancel = host.transfer_cancel(&headers).await?;
     host.store.channel(&query.channel_id, "text")?;
     let name = validation::filename(&query.name)?;
     if headers
@@ -515,6 +535,7 @@ async fn upload(
     loop {
         let chunk = tokio::select! {
             _=host.shutdown.cancelled()=>return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Комната закрыта")),
+            _=transfer_cancel.cancelled()=>return Err(ApiError::unauthorized()),
             chunk=tokio::time::timeout(Duration::from_secs(60),stream.next())=>chunk.map_err(|_|ApiError::bad("Превышено время ожидания загрузки"))?,
         };
         let Some(chunk) = chunk else {
@@ -536,10 +557,10 @@ async fn upload(
     file.sync_all().await?;
     drop(file);
     let sha256 = hex::encode(hash.finalize());
-    if let Some(expected) = headers.get("x-spark-sha256").and_then(|h| h.to_str().ok()) {
-        if !validation::equal_secret(expected, &sha256) {
-            return Err(ApiError::bad("Контрольная сумма файла не совпадает"));
-        }
+    if let Some(expected) = headers.get("x-spark-sha256").and_then(|h| h.to_str().ok())
+        && !validation::equal_secret(expected, &sha256)
+    {
+        return Err(ApiError::bad("Контрольная сумма файла не совпадает"));
     }
     let _event = host.events.lock().await;
     host.identity(&headers).await?;
@@ -599,7 +620,10 @@ async fn download(
     host.authorize(&headers)?;
     let info = host.store.file(&id)?;
     let file = tokio::fs::File::open(host.store.files_dir.join(&info.id)).await?;
-    let mut response = Body::from_stream(ReaderStream::new(file)).into_response();
+    let mut response = Body::from_stream(
+        ReaderStream::new(file).take_until(host.shutdown.clone().cancelled_owned()),
+    )
+    .into_response();
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         header::CONTENT_TYPE,

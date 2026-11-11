@@ -48,7 +48,7 @@ npm start
 cargo test --locked -p spark-protocol -p spark-service
 cargo check --locked -p spark-ui --target wasm32-unknown-unknown
 # Linux: отдельный тестовый экран, реальные окна и два отдельных Rust-сервиса
-xvfb-run -a -s '-screen 0 1600x1000x24' npm run test:e2e
+npm run test:e2e:linux
 ```
 
 Тесты используют настоящие TCP/WebSocket-соединения, SQLite и файлы. Сквозной сценарий запускает два независимых приложения, отправляет сообщения в обе стороны, создаёт канал, сверяет полученный файл с исходными байтами, проверяет реальную передачу RTP, декодирование кадров обеих камер, mute/deafen, приглашение, завершение и повторный звонок, перезапуск процессов с сохранением истории.

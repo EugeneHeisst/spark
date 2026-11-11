@@ -22,6 +22,7 @@ socket2 = { version = "0.6", features = ["all"] }
 tower-http = { version = "0.6", features = ["fs"] }
 url = "2"
 anyhow = "1"
+if-addrs = "=0.15.0"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"

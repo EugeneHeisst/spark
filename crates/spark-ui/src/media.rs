@@ -54,8 +54,8 @@ struct Inner {
     microphone: RefCell<Option<MediaStream>>,
     camera: RefCell<Option<MediaStream>>,
     screen: RefCell<Option<MediaStream>>,
-    screen_ended: RefCell<Option<Closure<dyn FnMut(Event)>>>,
-    camera_ended: RefCell<Option<Closure<dyn FnMut(Event)>>>,
+    screen_ended: RefCell<Option<JsValue>>,
+    camera_ended: RefCell<Option<JsValue>>,
     epoch: Cell<u64>,
     camera_busy: Cell<bool>,
     screen_busy: Cell<bool>,
@@ -66,10 +66,16 @@ struct Connection {
     senders: RefCell<[Option<RtcRtpSender>; 3]>,
     streams: RefCell<HashMap<String, MediaStream>>,
     remote_description: Cell<bool>,
+    remote_ufrag: RefCell<Option<String>>,
     candidates: RefCell<Vec<Value>>,
     operations: RefCell<VecDeque<Operation>>,
     processing: Cell<bool>,
-    handlers: RefCell<Vec<Closure<dyn FnMut(Event)>>>,
+    handlers: RefCell<Vec<JsValue>>,
+    recovery_attempts: Cell<u8>,
+    recovery_pending: Cell<bool>,
+    recovery_offer_needed: Cell<bool>,
+    recovery_timer: Cell<Option<i32>>,
+    recovery_exhausted: Cell<bool>,
 }
 
 enum Operation {
@@ -304,7 +310,7 @@ impl MediaManager {
         }
         if !matches!(
             payload.get("type").and_then(Value::as_str),
-            Some("offer" | "answer" | "ice")
+            Some("offer" | "answer" | "ice" | "restart")
         ) {
             self.report("Получен неизвестный сигнал WebRTC".into());
             return;
@@ -422,10 +428,16 @@ impl MediaManager {
             senders: RefCell::new(senders),
             streams: RefCell::new(HashMap::new()),
             remote_description: Cell::new(false),
+            remote_ufrag: RefCell::new(None),
             candidates: RefCell::new(Vec::new()),
             operations: RefCell::new(VecDeque::new()),
             processing: Cell::new(false),
             handlers: RefCell::new(Vec::new()),
+            recovery_attempts: Cell::new(0),
+            recovery_pending: Cell::new(false),
+            recovery_offer_needed: Cell::new(false),
+            recovery_timer: Cell::new(None),
+            recovery_exhausted: Cell::new(false),
         });
         self.inner
             .peers
@@ -433,9 +445,21 @@ impl MediaManager {
             .insert(id.into(), connection.clone());
 
         let weak = Rc::downgrade(&self.inner);
+        let weak_connection = Rc::downgrade(&connection);
         let peer_id = id.to_string();
         let ice = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
             let Some(inner) = weak.upgrade() else { return };
+            let Some(connection) = weak_connection.upgrade() else {
+                return;
+            };
+            if !inner
+                .peers
+                .borrow()
+                .get(&peer_id)
+                .is_some_and(|current| Rc::ptr_eq(current, &connection))
+            {
+                return;
+            }
             let Ok(event) = event.dyn_into::<RtcPeerConnectionIceEvent>() else {
                 return;
             };
@@ -443,17 +467,31 @@ impl MediaManager {
                 (inner.callbacks.on_signal)(
                     peer_id.clone(),
                     json!({"type":"ice", "candidate": candidate.candidate(),
-                    "sdpMid":candidate.sdp_mid(), "sdpMLineIndex":candidate.sdp_m_line_index()}),
+                    "sdpMid":candidate.sdp_mid(), "sdpMLineIndex":candidate.sdp_m_line_index(),
+                    "usernameFragment":property_string(candidate.as_ref(), "usernameFragment")}),
                 );
             }
         });
-        pc.set_onicecandidate(Some(ice.as_ref().unchecked_ref()));
+        let ice = ice.into_js_value();
+        pc.set_onicecandidate(Some(ice.unchecked_ref()));
         connection.handlers.borrow_mut().push(ice);
 
         let weak = Rc::downgrade(&self.inner);
+        let weak_connection = Rc::downgrade(&connection);
         let peer_id = id.to_string();
         let ontrack = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
             let Some(inner) = weak.upgrade() else { return };
+            let Some(connection) = weak_connection.upgrade() else {
+                return;
+            };
+            if !inner
+                .peers
+                .borrow()
+                .get(&peer_id)
+                .is_some_and(|current| Rc::ptr_eq(current, &connection))
+            {
+                return;
+            }
             let Ok(event) = event.dyn_into::<RtcTrackEvent>() else {
                 return;
             };
@@ -472,9 +510,6 @@ impl MediaManager {
             if kind == "audio" {
                 track.set_enabled(!inner.state.borrow().deafened);
             }
-            let Some(connection) = inner.peers.borrow().get(&peer_id).cloned() else {
-                return;
-            };
             connection.streams.borrow_mut().insert(kind.into(), stream);
             let active = kind == "audio"
                 || inner.known.borrow().get(&peer_id).is_some_and(|peer| {
@@ -486,23 +521,23 @@ impl MediaManager {
                 });
             MediaManager { inner }.publish_remote(&peer_id, kind, active);
         });
-        pc.set_ontrack(Some(ontrack.as_ref().unchecked_ref()));
+        let ontrack = ontrack.into_js_value();
+        pc.set_ontrack(Some(ontrack.unchecked_ref()));
         connection.handlers.borrow_mut().push(ontrack);
 
         let weak = Rc::downgrade(&self.inner);
+        let weak_connection = Rc::downgrade(&connection);
         let peer_id = id.to_string();
         let state_changed = Closure::<dyn FnMut(Event)>::new(move |_| {
             let Some(inner) = weak.upgrade() else { return };
-            let Some(connection) = inner.peers.borrow().get(&peer_id).cloned() else {
+            let Some(connection) = weak_connection.upgrade() else {
                 return;
             };
-            let state = property_string(connection.pc.as_ref(), "connectionState");
-            (inner.callbacks.on_connection)(peer_id.clone(), state.clone());
-            if state == "failed" {
-                (inner.callbacks.on_error)("Не удалось установить медиасоединение в локальной сети. Проверьте сетевой экран и изоляцию Wi-Fi.".into());
-            }
+            MediaManager { inner }.connection_changed(&peer_id, &connection);
         });
-        pc.set_onconnectionstatechange(Some(state_changed.as_ref().unchecked_ref()));
+        let state_changed = state_changed.into_js_value();
+        pc.set_onconnectionstatechange(Some(state_changed.unchecked_ref()));
+        pc.set_oniceconnectionstatechange(Some(state_changed.unchecked_ref()));
         connection.handlers.borrow_mut().push(state_changed);
         (self.inner.callbacks.on_connection)(id.into(), "new".into());
         self.enqueue(id, Operation::Attach);
@@ -512,10 +547,114 @@ impl MediaManager {
         Ok(())
     }
 
+    fn connection_changed(&self, id: &str, connection: &Rc<Connection>) {
+        if !self.is_current(id, connection) {
+            return;
+        }
+        let state = property_string(connection.pc.as_ref(), "connectionState");
+        let ice = property_string(connection.pc.as_ref(), "iceConnectionState");
+        (self.inner.callbacks.on_connection)(id.into(), state.clone());
+        if state == "connected" && matches!(ice.as_str(), "connected" | "completed") {
+            self.cancel_recovery_timer(connection);
+            connection.recovery_pending.set(false);
+        } else if (state == "failed" || ice == "failed") && !connection.recovery_pending.get() {
+            self.schedule_recovery(id, connection, 0, false);
+        } else if (state == "disconnected" || ice == "disconnected")
+            && !connection.recovery_pending.get()
+            && connection.recovery_timer.get().is_none()
+        {
+            self.schedule_recovery(id, connection, 4_000, false);
+        }
+    }
+
+    fn cancel_recovery_timer(&self, connection: &Connection) {
+        if let Some(timer) = connection.recovery_timer.take() {
+            if let Some(window) = web_sys::window() {
+                window.clear_timeout_with_handle(timer);
+            }
+        }
+    }
+
+    fn schedule_recovery(&self, id: &str, connection: &Rc<Connection>, delay: i32, watchdog: bool) {
+        self.cancel_recovery_timer(connection);
+        let weak = Rc::downgrade(&self.inner);
+        let weak_connection = Rc::downgrade(connection);
+        let id = id.to_string();
+        // Weak captures deliberately keep neither devices nor connections alive.
+        let callback = Closure::once_into_js(move || {
+            let (Some(inner), Some(connection)) = (weak.upgrade(), weak_connection.upgrade())
+            else {
+                return;
+            };
+            let this = MediaManager { inner };
+            if !this.is_current(&id, &connection) {
+                return;
+            }
+            connection.recovery_timer.set(None);
+            let state = property_string(connection.pc.as_ref(), "connectionState");
+            let ice = property_string(connection.pc.as_ref(), "iceConnectionState");
+            if state == "closed"
+                || (state == "connected" && matches!(ice.as_str(), "connected" | "completed"))
+            {
+                connection.recovery_pending.set(false);
+                return;
+            }
+            if watchdog {
+                connection.recovery_pending.set(false);
+            }
+            if watchdog
+                || matches!(state.as_str(), "failed" | "disconnected")
+                || matches!(ice.as_str(), "failed" | "disconnected")
+            {
+                this.begin_recovery(&id, &connection);
+            }
+        });
+        if let Some(window) = web_sys::window() {
+            match window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.unchecked_ref(),
+                delay,
+            ) {
+                Ok(timer) => connection.recovery_timer.set(Some(timer)),
+                Err(error) => self.report(js_error(error)),
+            }
+        }
+    }
+
+    fn begin_recovery(&self, id: &str, connection: &Rc<Connection>) {
+        if !self.is_current(id, connection) || connection.recovery_pending.get() {
+            return;
+        }
+        self.cancel_recovery_timer(connection);
+        if connection.recovery_attempts.get() >= 3 {
+            if !connection.recovery_exhausted.replace(true) {
+                (self.inner.callbacks.on_connection)(id.into(), "failed".into());
+                self.report("Не удалось восстановить звонок после 3 попыток. Проверьте сетевой экран и изоляцию Wi-Fi, затем выйдите из голосового канала и войдите снова.".into());
+            }
+            return;
+        }
+        connection
+            .recovery_attempts
+            .set(connection.recovery_attempts.get() + 1);
+        connection.recovery_pending.set(true);
+        (self.inner.callbacks.on_connection)(id.into(), "connecting".into());
+        if self.inner.self_id.as_str() < id {
+            connection.recovery_offer_needed.set(true);
+            self.enqueue(id, Operation::Offer);
+        } else {
+            // The answerer requests recovery; it never creates a competing offer.
+            (self.inner.callbacks.on_signal)(id.into(), json!({"type":"restart"}));
+        }
+        self.schedule_recovery(id, connection, 8_000, true);
+    }
+
     fn enqueue(&self, id: &str, operation: Operation) {
         let Some(connection) = self.inner.peers.borrow().get(id).cloned() else {
             return;
         };
+        if connection.operations.borrow().len() >= 256 {
+            self.report("Слишком много ожидающих сигналов WebRTC".into());
+            return;
+        }
         connection.operations.borrow_mut().push_back(operation);
         if connection.processing.replace(true) {
             return;
@@ -553,6 +692,9 @@ impl MediaManager {
                 if connection.pc.signaling_state() != RtcSignalingState::Stable {
                     return Ok(());
                 }
+                if connection.recovery_offer_needed.replace(false) {
+                    restart_ice(&connection.pc)?;
+                }
                 let offer = JsFuture::from(connection.pc.create_offer())
                     .await
                     .map_err(js_error)?;
@@ -567,8 +709,15 @@ impl MediaManager {
                 }
             }
             Operation::Signal(payload) => match payload["type"].as_str() {
+                Some("restart") => {
+                    if self.inner.self_id.as_str() < id {
+                        self.begin_recovery(id, connection);
+                    }
+                }
                 Some("ice") => {
-                    if !connection.remote_description.get() {
+                    if !connection.remote_description.get()
+                        || !candidate_matches(&payload, connection.remote_ufrag.borrow().as_deref())
+                    {
                         let mut pending = connection.candidates.borrow_mut();
                         if pending.len() >= 256 {
                             return Err("Слишком много ICE-кандидатов".into());
@@ -596,6 +745,10 @@ impl MediaManager {
                     JsFuture::from(connection.pc.set_remote_description(&description))
                         .await
                         .map_err(js_error)?;
+                    *connection.remote_ufrag.borrow_mut() = sdp.lines().find_map(|line| {
+                        line.strip_prefix("a=ice-ufrag:")
+                            .map(|value| value.trim().to_string())
+                    });
                     if kind == "offer" {
                         let transceivers: Vec<RtcRtpTransceiver> = connection
                             .pc
@@ -615,7 +768,13 @@ impl MediaManager {
                     connection.remote_description.set(true);
                     let candidates = std::mem::take(&mut *connection.candidates.borrow_mut());
                     for candidate in candidates {
-                        add_candidate(&connection.pc, &candidate).await?;
+                        let matches = candidate_matches(
+                            &candidate,
+                            connection.remote_ufrag.borrow().as_deref(),
+                        );
+                        if matches {
+                            add_candidate(&connection.pc, &candidate).await?;
+                        }
                     }
                     if kind == "offer" {
                         let answer = JsFuture::from(connection.pc.create_answer())
@@ -633,6 +792,9 @@ impl MediaManager {
                                 json!({"type":"answer","sdp":sdp}),
                             );
                         }
+                    }
+                    if kind == "answer" && connection.recovery_offer_needed.get() {
+                        self.enqueue(id, Operation::Offer);
                     }
                 }
                 _ => return Err("Неизвестный сигнал".into()),
@@ -698,6 +860,8 @@ impl MediaManager {
             connection.pc.set_onicecandidate(None);
             connection.pc.set_ontrack(None);
             connection.pc.set_onconnectionstatechange(None);
+            connection.pc.set_oniceconnectionstatechange(None);
+            self.cancel_recovery_timer(&connection);
             connection.pc.close();
             connection.operations.borrow_mut().clear();
             connection.handlers.borrow_mut().clear();
@@ -714,14 +878,19 @@ impl MediaManager {
     fn bind_capture_ended(&self, track: &MediaStreamTrack, screen: bool) {
         let weak = Rc::downgrade(&self.inner);
         let epoch = self.inner.epoch.get();
+        let track_id = track.id();
         let ended = Closure::<dyn FnMut(Event)>::new(move |_| {
             let Some(inner) = weak.upgrade() else { return };
             if inner.epoch.get() != epoch {
                 return;
             }
             let this = MediaManager { inner };
+            if !this.is_current_capture(screen, &track_id) {
+                return;
+            }
+            let track_id = track_id.clone();
             spawn_local(async move {
-                if this.inner.epoch.get() != epoch {
+                if this.inner.epoch.get() != epoch || !this.is_current_capture(screen, &track_id) {
                     return;
                 }
                 let result = if screen {
@@ -734,12 +903,29 @@ impl MediaManager {
                 }
             });
         });
-        track.set_onended(Some(ended.as_ref().unchecked_ref()));
+        // A native source can queue an ended event just before stop/leave. JS
+        // ownership keeps this function callable until that queued reference is
+        // gone; dropping a Rust-owned Closure here would invalidate its wrapper.
+        // Weak captures and the epoch guard make a late call harmless.
+        let ended = ended.into_js_value();
+        track.set_onended(Some(ended.unchecked_ref()));
         if screen {
             *self.inner.screen_ended.borrow_mut() = Some(ended);
         } else {
             *self.inner.camera_ended.borrow_mut() = Some(ended);
         }
+    }
+
+    fn is_current_capture(&self, screen: bool, track_id: &str) -> bool {
+        let slot = if screen {
+            &self.inner.screen
+        } else {
+            &self.inner.camera
+        };
+        slot.borrow()
+            .as_ref()
+            .and_then(|stream| first_track(stream, "video"))
+            .is_some_and(|track| track.id() == track_id)
     }
 
     async fn stop_camera(&self) -> Result<(), String> {
@@ -812,6 +998,19 @@ impl MediaManager {
         });
         let _ = Reflect::set(&debug, &"stats".into(), stats.as_ref());
         stats.forget();
+        let weak = Rc::downgrade(&self.inner);
+        let restart = Closure::<dyn FnMut(String)>::new(move |id: String| {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            let this = MediaManager { inner };
+            let connection = this.inner.peers.borrow().get(&id).cloned();
+            if let Some(connection) = connection {
+                this.begin_recovery(&id, &connection);
+            }
+        });
+        let _ = Reflect::set(&debug, &"restartIce".into(), restart.as_ref());
+        restart.forget();
         let _ = Reflect::set(&window, &"sparkMediaDebug".into(), &debug);
     }
 
@@ -840,7 +1039,10 @@ impl MediaManager {
             json!({"id":id,"connectionState":property_string(connection.pc.as_ref(), "connectionState"),
                 "signalingState":property_string(connection.pc.as_ref(), "signalingState"),
                 "iceConnectionState":property_string(connection.pc.as_ref(), "iceConnectionState"),
-                "senders":senders,"queuedIce":connection.candidates.borrow().len()})
+                "senders":senders,"queuedIce":connection.candidates.borrow().len(),
+                "recoveryAttempts":connection.recovery_attempts.get(),"recoveryPending":connection.recovery_pending.get(),
+                "remoteUfrag":connection.remote_ufrag.borrow().clone(),
+                "localUfrag":Reflect::get(connection.pc.as_ref(), &"localDescription".into()).ok().and_then(|description| sdp_ufrag(&property_string(&description,"sdp")))})
         }).collect();
         let value = json!({"selfId":self.inner.self_id,"channelId":state.channel_id,"muted":state.muted,
             "deafened":state.deafened,"camera":state.camera,"screen":state.screen,"localTracks":local,"peers":peers});
@@ -903,6 +1105,12 @@ async fn add_candidate(pc: &RtcPeerConnection, payload: &Value) -> Result<(), St
         .ok_or("Некорректный ICE-кандидат")?;
     let init = RtcIceCandidateInit::new(candidate);
     init.set_sdp_mid(payload["sdpMid"].as_str());
+    if let Some(ufrag) = payload["usernameFragment"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        Reflect::set(init.as_ref(), &"usernameFragment".into(), &ufrag.into()).map_err(js_error)?;
+    }
     init.set_sdp_m_line_index(
         payload["sdpMLineIndex"]
             .as_u64()
@@ -911,5 +1119,33 @@ async fn add_candidate(pc: &RtcPeerConnection, payload: &Value) -> Result<(), St
     JsFuture::from(pc.add_ice_candidate_with_opt_rtc_ice_candidate_init(Some(&init)))
         .await
         .map_err(js_error)?;
+    Ok(())
+}
+
+fn candidate_matches(payload: &Value, ufrag: Option<&str>) -> bool {
+    match payload["usernameFragment"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        Some(candidate_ufrag) => ufrag == Some(candidate_ufrag),
+        None => true,
+    }
+}
+
+fn sdp_ufrag(sdp: &str) -> Option<String> {
+    sdp.lines().find_map(|line| {
+        line.strip_prefix("a=ice-ufrag:")
+            .map(|value| value.trim().to_string())
+    })
+}
+
+fn restart_ice(pc: &RtcPeerConnection) -> Result<(), String> {
+    // web-sys's stable WebIDL omits restartIce, although Chromium implements it.
+    // The browser method is called from Rust; signaling/retry logic stays here.
+    let method: js_sys::Function = Reflect::get(pc.as_ref(), &"restartIce".into())
+        .map_err(js_error)?
+        .dyn_into()
+        .map_err(|_| "Браузер не поддерживает восстановление ICE".to_string())?;
+    method.call0(pc.as_ref()).map_err(js_error)?;
     Ok(())
 }
