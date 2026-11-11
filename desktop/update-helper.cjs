@@ -133,7 +133,18 @@ try {
     }
     Start-Sleep -Milliseconds 100
   }
-  throw 'New Spark did not acknowledge startup'
+  $ackInfo = 'missing'
+  if (Test-Path -LiteralPath $job.ack) {
+    $ackSize = (Get-Item -LiteralPath $job.ack).Length
+    $ackInfo = 'present, bytes=' + $ackSize
+  }
+  $childInfo = 'unavailable'
+  if ($child) {
+    $child.Refresh()
+    $childInfo = 'exited=' + $child.HasExited
+    if ($child.HasExited) { $childInfo += ', code=' + $child.ExitCode }
+  }
+  throw ('New Spark did not acknowledge startup (ack: ' + $ackInfo + '; child: ' + $childInfo + ')')
 } catch {
   $failure = $_.Exception.Message
   [IO.File]::WriteAllText(($JobFile + '.error'), $failure)

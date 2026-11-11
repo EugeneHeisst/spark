@@ -234,10 +234,21 @@ async function runHelperFixture(t, success) {
   const windows = process.platform === 'win32';
   const executable = windows ? 'Spark.exe' : 'spark-lan';
   if (windows) {
-    const cmd = path.join(process.env.SystemRoot, 'System32', 'cmd.exe');
-    await fsp.copyFile(cmd, path.join(installDir, executable)); await fsp.copyFile(cmd, path.join(source, executable));
-    await fsp.writeFile(path.join(installDir, 'fixture.cmd'), `@echo old>"${marker}"\r\n`);
-    await fsp.writeFile(path.join(source, 'fixture.cmd'), success ? `@<nul set /p =${token}>"${ack}"\r\n` : '@exit /b 1\r\n');
+    // Use a real native executable with byte-exact acknowledgement. A copied
+    // CMD interpreter plus SET /P conflates shell parsing with helper behavior.
+    await fsp.copyFile(process.execPath, path.join(installDir, executable)); await fsp.copyFile(process.execPath, path.join(source, executable));
+    await fsp.writeFile(path.join(installDir, 'fixture.cjs'), `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'old');\n`);
+    await fsp.writeFile(path.join(source, 'fixture.cjs'), success
+      ? `require('node:fs').writeFileSync(${JSON.stringify(ack)}, ${JSON.stringify(token)});\n`
+      : 'process.exit(1);\n');
+    if (success) {
+      const preflight = spawn(path.join(source, executable), ['fixture.cjs'], { cwd: source });
+      let output = ''; preflight.stdout.on('data', b => { output += b; }); preflight.stderr.on('data', b => { output += b; });
+      await once(preflight, 'exit');
+      const bytes = await fsp.readFile(ack).catch(() => Buffer.alloc(0));
+      assert.equal(bytes.toString(), token, 'Native fixture preflight must emit the exact acknowledgement; hex=' + bytes.toString('hex') + '; output=' + output);
+      await fsp.rm(ack, { force: true });
+    }
   } else {
     const quote = s => "'" + s.replaceAll("'", "'\\''") + "'";
     await fsp.writeFile(path.join(installDir, executable), `#!/bin/sh\nprintf old > ${quote(marker)}\n`, { mode: 0o755 });
@@ -245,7 +256,7 @@ async function runHelperFixture(t, success) {
   }
   await fsp.writeFile(path.join(installDir, 'version'), 'old'); await fsp.writeFile(path.join(source, 'version'), 'new');
   const job = { token, version: '0.3.0', parentPid: 2147483647, installDir, source, stage, executable,
-    launchArgs: windows ? ['/c', 'fixture.cmd'] : [], backup: path.join(root, 'old backup'), ack,
+    launchArgs: windows ? ['fixture.cjs'] : [], backup: path.join(root, 'old backup'), ack,
     started: path.join(root, token + '.started'), cancel: path.join(root, token + '.cancel'), timeout: success ? 3000 : 500, installer: null };
   job.backup = path.join(root, `.spark-backup-${token}`);
   const jobFile = path.join(root, 'pending.json'); await fsp.writeFile(jobFile, JSON.stringify(job));
@@ -254,9 +265,10 @@ async function runHelperFixture(t, success) {
     const script = path.join(root, 'helper with spaces.ps1'); await fsp.writeFile(script, powershellScript);
     helper = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-JobFile', jobFile]);
   } else helper = spawn(process.execPath, [path.resolve(__dirname, '../../desktop/update-helper.cjs'), jobFile]);
-  let diagnostics = ''; helper.stderr.on('data', b => { diagnostics += b; });
+  let diagnostics = ''; helper.stderr.on('data', b => { diagnostics += b; }); helper.stdout.on('data', b => { diagnostics += b; });
   const [code] = await once(helper, 'exit'); assert.equal(code, 0, diagnostics);
-  assert.equal(await fsp.readFile(path.join(installDir, 'version'), 'utf8'), success ? 'new' : 'old');
+  const error = await fsp.readFile(jobFile + '.error', 'utf8').catch(() => 'none');
+  assert.equal(await fsp.readFile(path.join(installDir, 'version'), 'utf8'), success ? 'new' : 'old', diagnostics + '; helper error=' + error);
   assert.equal(fs.existsSync(job.backup), false); assert.equal(fs.existsSync(stage), false);
   if (!success) {
     assert.match(await fsp.readFile(jobFile + '.error', 'utf8'), /подтвердила|acknowledge/);
