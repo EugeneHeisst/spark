@@ -42,8 +42,7 @@
     },
     "win": {
       "icon": "assets/icon.ico",
-      "artifactName": "Spark-${version}-windows-${arch}.${ext}",
-      "signAndEditExecutable": false
+      "artifactName": "Spark-${version}-windows-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,

@@ -19,15 +19,19 @@ struct Advertisement {
     port: u16,
     peers: usize,
 }
-pub async fn advertise(host: Arc<HostState>, port: u16, stop: CancellationToken) {
+pub async fn advertise(
+    host: Arc<HostState>,
+    port: u16,
+    stop: CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
     let socket = match socket() {
         Ok(socket) => socket,
         Err(e) => {
             eprintln!("Spark discovery unavailable (manual join still works): {e}");
-            return;
+            return None;
         }
     };
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         let mut buffer = [0u8; 2048];
         loop {
             tokio::select! {
@@ -40,7 +44,7 @@ pub async fn advertise(host: Arc<HostState>, port: u16, stop: CancellationToken)
                 }
             }
         }
-    });
+    }))
 }
 fn socket() -> std::io::Result<UdpSocket> {
     let socket = socket2::Socket::new(

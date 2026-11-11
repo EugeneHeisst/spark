@@ -10,6 +10,9 @@ use tempfile::TempDir;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+// Every room advertises on one shared UDP port. Keep independent fixtures from
+// competing for datagrams, and allow the exclusive-port failure regression.
+static NETWORK_FIXTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 fn client() -> Client {
     Client::builder().no_proxy().build().unwrap()
 }
@@ -91,6 +94,7 @@ async fn welcome(socket: &mut Socket) -> ServerEvent {
 
 #[tokio::test]
 async fn loopback_nonce_origin_code_and_input_validation() {
+    let _network = NETWORK_FIXTURE.lock().await;
     let root = TempDir::new().unwrap();
     let service = start(root.path()).await;
     let client = client();
@@ -193,6 +197,7 @@ async fn loopback_nonce_origin_code_and_input_validation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_clients_chat_signaling_stale_reconnect_files_save_and_restart() {
+    let _network = NETWORK_FIXTURE.lock().await;
     let a_root = TempDir::new().unwrap();
     let b_root = TempDir::new().unwrap();
     let destination = TempDir::new().unwrap();
@@ -482,6 +487,7 @@ async fn two_clients_chat_signaling_stale_reconnect_files_save_and_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn closing_the_sender_socket_cancels_an_unfinished_upload_and_removes_temporary_bytes() {
+    let _network = NETWORK_FIXTURE.lock().await;
     let a_root = TempDir::new().unwrap();
     let b_root = TempDir::new().unwrap();
     let a = start(a_root.path()).await;
@@ -504,10 +510,16 @@ async fn closing_the_sender_socket_cancels_an_unfinished_upload_and_removes_temp
     let files = a_root.path().join("host/files");
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if std::fs::read_dir(&files)
-                .unwrap()
-                .any(|entry| entry.unwrap().metadata().unwrap().len() > 0)
-            {
+            // Windows directory enumeration may report a stale file size while
+            // the upload writer is still open. Observe the actual bytes instead.
+            if std::fs::read_dir(&files).unwrap().any(|entry| {
+                use std::io::Read;
+                let mut byte = [0u8; 1];
+                std::fs::File::open(entry.unwrap().path())
+                    .and_then(|mut file| file.read_exact(&mut byte))
+                    .is_ok()
+                    && byte[0] == 0x55
+            }) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -541,6 +553,7 @@ async fn closing_the_sender_socket_cancels_an_unfinished_upload_and_removes_temp
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fresh_gateways_repeatedly_discover_the_live_room_over_real_udp() {
+    let _network = NETWORK_FIXTURE.lock().await;
     let a_root = TempDir::new().unwrap();
     let a = start(a_root.path()).await;
     let client = client();
@@ -577,5 +590,40 @@ async fn fresh_gateways_repeatedly_discover_the_live_room_over_real_udp() {
         b.shutdown().await;
     }
     drop(ws);
+    a.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn occupied_discovery_port_keeps_manual_join_and_chat_working() {
+    let _network = NETWORK_FIXTURE.lock().await;
+    let _occupied = std::net::UdpSocket::bind((
+        std::net::Ipv4Addr::UNSPECIFIED,
+        spark_protocol::DISCOVERY_PORT,
+    ))
+    .unwrap();
+    let a_root = TempDir::new().unwrap();
+    let b_root = TempDir::new().unwrap();
+    let a = start(a_root.path()).await;
+    let b = start(b_root.path()).await;
+    let client = client();
+    // Advertising may fail, but the normal host endpoint must still succeed.
+    let info = host(&client, &a).await;
+    join(&client, &b, &info).await;
+    let mut aw = socket(&a).await;
+    welcome(&mut aw).await;
+    let mut bw = socket(&b).await;
+    welcome(&mut bw).await;
+    send(
+        &mut bw,
+        ClientCommand::Chat {
+            channel_id: "general".into(),
+            text: "manual join without discovery".into(),
+        },
+    )
+    .await;
+    event(&mut aw,|event|matches!(event,ServerEvent::Chat {message} if message.text=="manual join without discovery")).await;
+    drop(aw);
+    drop(bw);
+    b.shutdown().await;
     a.shutdown().await;
 }

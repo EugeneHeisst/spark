@@ -38,10 +38,18 @@ pub struct HostHandle {
     pub port: u16,
     pub shutdown: CancellationToken,
     task: tokio::task::JoinHandle<()>,
+    discovery: Option<tokio::task::JoinHandle<()>>,
 }
 impl HostHandle {
     pub async fn stop(mut self) {
         self.shutdown.cancel();
+        if let Some(mut discovery) = self.discovery.take()
+            && tokio::time::timeout(Duration::from_secs(1), &mut discovery)
+                .await
+                .is_err()
+        {
+            discovery.abort();
+        }
         if tokio::time::timeout(Duration::from_secs(3), &mut self.task)
             .await
             .is_err()
@@ -116,11 +124,12 @@ pub async fn start(
             eprintln!("Spark LAN HTTP: {e}");
         }
     });
-    crate::discovery::advertise(state.clone(), port, shutdown.clone()).await;
+    let discovery = crate::discovery::advertise(state.clone(), port, shutdown.clone()).await;
     Ok(HostHandle {
         port,
         shutdown,
         task,
+        discovery,
     })
 }
 

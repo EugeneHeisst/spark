@@ -175,6 +175,15 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
       await windowChoice.click();
       const screen = await assertRemoteVideo(b.page, aliceId, 'screen');
       await retainCapture(a.page, 'screen');
+      await id(b.page, `expand-${aliceId}-screen`).click();
+      const expanded = id(b.page, 'expanded-video');
+      await expect(expanded).toBeVisible();
+      await expect.poll(() => expanded.evaluate(v => v.videoWidth > 0 && v.currentTime > 0.1)).toBe(true);
+      expect((await expanded.boundingBox()).height).toBeGreaterThan(350);
+      await b.page.screenshot({ path: info.outputPath('04-expanded-screen.png') });
+      await b.page.keyboard.press('Escape');
+      await expect(expanded).toHaveCount(0);
+      expect(await a.page.evaluate(() => window.sparkTestTracks.screen.readyState)).toBe('live');
       // Decode actual received pixels: count the target's specific green,
       // distinct from the fake camera's pure-green test pattern and black tiles.
       await expect.poll(() => screen.evaluate(video => {

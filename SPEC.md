@@ -47,7 +47,7 @@ Default service: `spark-service --data-dir PATH --ui-dir assets --gateway-port 0
 GET `/api/bootstrap` -> Bootstrap (same-origin only). All other local API requests require `x-spark-token`; events/file-link may use `?token=` because browser WebSocket cannot set headers. Local bind strictly127.0.0.1, validate Host and Origin; no permissive CORS. Assets/index served at `/` and static child paths. API max JSON size64KiB, clear typed JSON errors `{ error: string }`.
 
 - PUT `/api/profile` `{name}` -> Profile.
-- GET `/api/discovery` -> `Vec<Discovery>` (UDP39394 LAN discovery; include manual IP join regardless multicast firewall).
+- GET `/api/discovery` -> `Vec<Discovery>` (UDP23994 LAN discovery; include manual IP join regardless multicast firewall).
 - POST `/api/host` `{name, code, port?:u16}` -> ConnectionInfo, bind LAN TCP39393 by default, persist host SQLite/channels/files under data dir. Reject empty/short code (<6 chars). Defaults text `general`/`Общий`, voice `lounge`/`Голосовая`.
 - POST `/api/join` `{address, code}` -> ConnectionInfo, validate host credentials and save active remote config. Addresses `IP:port` or hostname:port, plain host only (no arbitrary paths/credentials).
 - POST `/api/disconnect` -> `{ok:true}`; shut down hosted space if applicable.

@@ -43,20 +43,23 @@ jobs:
       - name: WebAssembly bindings compiler
         run: python scripts/install-bindgen.py
       - run: npm run build
-      - name: Two desktop clients on an isolated display
-        if: runner.os == 'Linux'
-        run: npm run test:e2e:linux
-      - name: Two Windows desktop clients (synthetic input devices)
-        if: runner.os == 'Windows'
-        run: npm run test:e2e
-        env:
-          SPARK_SKIP_SCREEN_TEST: '1'
       - name: Linux packages
         if: runner.os == 'Linux'
         run: npm run package:linux
       - name: Windows installer and portable package
         if: runner.os == 'Windows'
         run: npm run package:win
+      - name: Linux desktop clients and packaged application
+        if: runner.os == 'Linux'
+        run: npm run test:e2e:linux
+        env:
+          SPARK_PACKAGED_BINARY: ${{ github.workspace }}/dist/linux-unpacked/spark-lan
+      - name: Windows desktop clients and packaged application
+        if: runner.os == 'Windows'
+        run: npm run test:e2e
+        env:
+          SPARK_SKIP_SCREEN_TEST: '1'
+          SPARK_PACKAGED_BINARY: ${{ github.workspace }}\dist\win-unpacked\Spark.exe
       - name: Upload desktop packages
         uses: actions/upload-artifact@v4
         with:

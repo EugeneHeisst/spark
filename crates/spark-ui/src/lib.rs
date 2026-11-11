@@ -68,6 +68,7 @@ struct App {
     error: Option<String>,
     notice: Option<String>,
     modal: Option<String>,
+    expanded_stream: Option<(String, String)>,
     invite: Option<Invite>,
     sources: Vec<Source>,
     media: Option<MediaManager>,
@@ -626,7 +627,7 @@ fn render_voice(app: &AppRef) {
                         .map(|p| p.name.as_str())
                         .unwrap_or("Участник")
                 };
-                tile.set_inner_html(&format!("<video id='{}' autoplay playsinline {} data-testid='video-{}-{}'></video><span>{}<small>{}</small></span><small class='tile-connection' id='tile-state-{}-{}'></small>",esc(&id),if peer=="local"{"muted"}else{""},esc(peer),esc(kind),esc(name),if kind=="screen"{" · Экран"}else{""},esc(peer),esc(kind)));
+                tile.set_inner_html(&format!("<video id='{}' autoplay playsinline {} data-testid='video-{}-{}'></video><span>{}<small>{}</small></span><small class='tile-connection' id='tile-state-{}-{}'></small><button class='video-expand' data-action='view-video' data-id='{}' data-name='{}' data-testid='expand-{}-{}' title='Развернуть видео' aria-label='Развернуть видео'>⛶</button>",esc(&id),if peer=="local"{"muted"}else{""},esc(peer),esc(kind),esc(name),if kind=="screen"{" · Экран"}else{""},esc(peer),esc(kind),esc(peer),esc(kind),esc(peer),esc(kind)));
                 if let Some(parent) = element("call-grid") {
                     parent.append_child(&tile).ok();
                 }
@@ -678,6 +679,17 @@ fn render_voice(app: &AppRef) {
 
 fn render_overlay(app: &AppRef) {
     let s = app.borrow();
+    let viewer = if s.modal.as_deref() == Some("viewer") {
+        s.expanded_stream.as_ref().and_then(|(peer, kind)| {
+            s.streams.get(&(peer.clone(), kind.clone())).map(|stream| {
+                // Preserve the same JS stream/track identity. MediaStream's
+                // inherent clone() would create additional captured tracks.
+                (peer.clone(), kind.clone(), Clone::clone(stream))
+            })
+        })
+    } else {
+        None
+    };
     let mut out = String::new();
     if let Some(e) = &s.error {
         out.push_str(&format!("<div class='toast error' role='alert' data-testid='error'><span>!</span><p>{}</p><button data-action='dismiss-error'>×</button></div>",esc(e)));
@@ -695,15 +707,32 @@ fn render_overlay(app: &AppRef) {
         out.push_str(&format!("<div class='modal-shade'><section class='modal invite-modal'><span class='avatar large'>{}</span><h2>{} приглашает в звонок</h2><p>{} · {}</p><p class='field-help'>Микрофон{} включится после принятия.</p><div class='modal-actions'><button data-action='reject-invite' data-testid='reject-invite'>Отклонить</button><button class='primary' data-action='accept-invite' data-testid='accept-invite'>Принять</button></div></section></div>",initial(&inv.from.name),esc(&inv.from.name),esc(channel),if inv.video {"Видеозвонок"} else {"Голосовой звонок"},if inv.video {" и камера"} else {""}));
     } else if let Some(modal) = &s.modal {
         let content=match modal.as_str() {
+            "viewer"=>viewer.as_ref().map(|(peer,kind,_)|{
+                let name=if peer=="local"{"Вы"}else{s.peers.iter().find(|p|&p.id==peer).map(|p|p.name.as_str()).unwrap_or("Участник")};
+                format!("<div class='viewer-heading'><span>{}</span><h2>{}</h2><small>Esc — вернуться к разговору</small></div><video id='expanded-video' data-testid='expanded-video' autoplay playsinline muted></video>",if kind=="screen"{"ДЕМОНСТРАЦИЯ ЭКРАНА"}else{"КАМЕРА"},esc(name))
+            }).unwrap_or_default(),
             "channel"=>format!("<span class='eyebrow'>ВАШЕ ПРОСТРАНСТВО</span><h2>Создать канал</h2><label class='field'>Название<input id='channel-name' data-field='channel-name' data-testid='channel-name' maxlength='64' value='{}' placeholder='Например: идеи'/></label><label class='field'>Тип канала<select data-field='channel-kind' data-testid='channel-kind'><option value='text' {}>Текстовый</option><option value='voice' {}>Голосовой</option></select></label><div class='modal-actions'><button data-action='close-modal'>Отмена</button><button class='primary' data-action='create-channel' data-testid='create-channel'>Создать</button></div>",esc(&s.form.channel_name),if s.form.channel_kind=="text" {"selected"} else {""},if s.form.channel_kind=="voice" {"selected"} else {""}),
             "settings"=>format!("<span class='eyebrow'>SPARK · {}</span><h2>Настройки</h2><label class='field'>Ваше имя<input data-field='settings-name' data-testid='settings-name' maxlength='64' value='{}'/></label><div class='settings-info'><strong>Локальная комната</strong><p>{}</p><code>{}</code><small>{}</small></div><div class='modal-actions'><button class='danger-text' data-action='disconnect' data-testid='disconnect'>{}</button><button class='primary' data-action='save-settings' data-testid='save-settings'>Сохранить</button></div>",esc(&s.version),esc(&s.form.settings_name),s.conn.as_ref().map(|c|esc(&c.server_name)).unwrap_or_default(),s.conn.as_ref().map(|c|esc(&c.address)).unwrap_or_default(),if s.conn.as_ref().is_some_and(|c|c.hosting) {"Вы — создатель. При выходе комната остановится для всех."} else {"Вы подключены к комнате в локальной сети."},if s.conn.as_ref().is_some_and(|c|c.hosting) {"Остановить комнату"} else {"Выйти из комнаты"}),
             "sources"=>{let mut x="<span class='eyebrow'>ДЕМОНСТРАЦИЯ ЭКРАНА</span><h2>Что показать команде?</h2><p>Выберите экран или отдельное окно.</p><div class='sources'>".to_string();for src in &s.sources { x.push_str(&format!("<button class='source' data-action='select-source' data-id='{}' data-testid='source-{}'><img src='{}' alt=''/><strong>{}</strong></button>",esc(&src.id),esc(&src.id),esc(&src.thumbnail),esc(&src.name))); }x.push_str("</div><div class='modal-actions'><button data-action='close-modal'>Отмена</button></div>");x},
             _=>"<div class='brand-mark'>ϟ</div><h2>Spark</h2><p>Общение рядом. Чаты, голос, видео и файлы в вашей локальной сети.</p><div class='modal-actions'><button class='primary' data-action='close-modal'>Понятно</button></div>".into()
         };
-        out.push_str(&format!("<div class='modal-shade'><section class='modal'><button class='modal-close' data-action='close-modal' title='Закрыть'>×</button>{content}</section></div>"));
+        out.push_str(&format!("<div class='modal-shade'><section class='modal {}'><button class='modal-close' data-action='close-modal' data-testid='{}' title='Закрыть'>×</button>{content}</section></div>",if modal=="viewer"{"video-viewer"}else{""},if modal=="viewer"{"close-video"}else{"close-modal"}));
     }
     drop(s);
     html("overlay", &out);
+    if let Some((_, _, stream)) = viewer {
+        if let Some(video) =
+            element("expanded-video").and_then(|el| el.dyn_into::<web_sys::HtmlMediaElement>().ok())
+        {
+            video.set_muted(true);
+            video.set_src_object(Some(&stream));
+            if let Ok(play) = video.play() {
+                spawn_local(async move {
+                    let _ = JsFuture::from(play).await;
+                });
+            }
+        }
+    }
 }
 
 fn install_events(app: &AppRef) {
@@ -794,7 +823,10 @@ fn install_events(app: &AppRef) {
                 send_chat(&a);
             }
             if ev.key() == "Escape" {
-                a.borrow_mut().modal = None;
+                let mut s = a.borrow_mut();
+                s.modal = None;
+                s.expanded_stream = None;
+                drop(s);
                 render_overlay(&a);
             }
         });
@@ -949,8 +981,21 @@ fn action_handler(app: &AppRef, action: &str, id: &str, name: &str) {
         "save-settings" => save_settings(app),
         "disconnect" => disconnect(app),
         "close-modal" => {
-            app.borrow_mut().modal = None;
+            let mut s = app.borrow_mut();
+            s.modal = None;
+            s.expanded_stream = None;
+            drop(s);
             render_overlay(app);
+        }
+        "view-video" => {
+            let key = (id.to_owned(), name.to_owned());
+            let mut s = app.borrow_mut();
+            if s.streams.contains_key(&key) && matches!(name, "camera" | "screen") {
+                s.expanded_stream = Some(key);
+                s.modal = Some("viewer".into());
+                drop(s);
+                render_overlay(app);
+            }
         }
         "about" => {
             app.borrow_mut().modal = Some("about".into());
@@ -1503,7 +1548,16 @@ fn install_media(app: &AppRef, self_id: String) {
     let weak = Rc::downgrade(app);
     let on_state = Rc::new(move |state: MediaState| {
         if let Some(a) = weak.upgrade() {
-            a.borrow_mut().media_state = state.clone();
+            let close_viewer = {
+                let mut s = a.borrow_mut();
+                s.media_state = state.clone();
+                let close = state.channel_id.is_none() && s.modal.as_deref() == Some("viewer");
+                if close {
+                    s.expanded_stream = None;
+                    s.modal = None;
+                }
+                close
+            };
             let connected = {
                 let s = a.borrow();
                 s.conn.is_some()
@@ -1523,6 +1577,9 @@ fn install_media(app: &AppRef, self_id: String) {
             }
             render_sidebar(&a);
             render_voice(&a);
+            if close_viewer {
+                render_overlay(&a);
+            }
         }
     });
     let weak = Rc::downgrade(app);
@@ -1530,13 +1587,28 @@ fn install_media(app: &AppRef, self_id: String) {
         move |peer: String, kind: String, stream: Option<MediaStream>| {
             if let Some(a) = weak.upgrade() {
                 let mut s = a.borrow_mut();
+                let key = (peer, kind);
+                let mut viewer_changed = s.modal.as_deref() == Some("viewer")
+                    && s.expanded_stream.as_ref() == Some(&key)
+                    && s.streams.get(&key).map(MediaStream::id)
+                        != stream.as_ref().map(MediaStream::id);
                 if let Some(stream) = stream {
-                    s.streams.insert((peer, kind), stream);
+                    s.streams.insert(key, stream);
                 } else {
-                    s.streams.remove(&(peer, kind));
+                    s.streams.remove(&key);
+                    if s.expanded_stream.as_ref() == Some(&key) {
+                        viewer_changed = true;
+                        s.expanded_stream = None;
+                        if s.modal.as_deref() == Some("viewer") {
+                            s.modal = None;
+                        }
+                    }
                 }
                 drop(s);
                 render_voice(&a);
+                if viewer_changed {
+                    render_overlay(&a);
+                }
             }
         },
     );

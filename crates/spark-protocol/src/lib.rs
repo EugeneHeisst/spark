@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_LAN_PORT: u16 = 39393;
-pub const DISCOVERY_PORT: u16 = 39394;
+// Stay below the common Linux (32768+) and Windows (49152+) ephemeral ranges.
+pub const DISCOVERY_PORT: u16 = 23994;
 pub const MAX_JSON_BYTES: usize = 64 * 1024;
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MAX_CHAT_CHARS: usize = 8000;
