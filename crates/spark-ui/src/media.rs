@@ -207,7 +207,9 @@ impl MediaManager {
         }
         let track = first_track(&stream, "video").ok_or("Камера не предоставила видеодорожку")?;
         self.bind_capture_ended(&track, false);
-        *self.inner.camera.borrow_mut() = Some(stream.clone());
+        // MediaStream::clone() is the browser API and clones its tracks. Share
+        // the JS stream reference so stop/ended affect the actual sent capture.
+        *self.inner.camera.borrow_mut() = Some(Clone::clone(&stream));
         if let Err(error) = self.replace_for_all(1, Some(track)).await {
             let _ = self.stop_camera().await;
             return Err(error);
@@ -258,7 +260,7 @@ impl MediaManager {
         }
         let track = first_track(&stream, "video").ok_or("Экран не предоставил видеодорожку")?;
         self.bind_capture_ended(&track, true);
-        *self.inner.screen.borrow_mut() = Some(stream.clone());
+        *self.inner.screen.borrow_mut() = Some(Clone::clone(&stream));
         if let Err(error) = self.replace_for_all(2, Some(track)).await {
             let _ = self.stop_screen().await;
             return Err(error);

@@ -26,6 +26,8 @@ jobs:
           targets: wasm32-unknown-unknown
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Linux desktop libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 libxss1 libxtst6 xvfb openbox dbus-x11
@@ -39,7 +41,7 @@ jobs:
       - name: Rust WebAssembly type check
         run: cargo check --locked -p spark-ui --target wasm32-unknown-unknown
       - name: WebAssembly bindings compiler
-        run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+        run: python scripts/install-bindgen.py
       - run: npm run build
       - name: Two desktop clients on an isolated display
         if: runner.os == 'Linux'

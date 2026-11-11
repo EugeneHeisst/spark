@@ -22,4 +22,4 @@ else
   exit 1
 fi
 trap 'if [[ -n "$wm_pid" ]]; then kill "$wm_pid" 2>/dev/null || true; fi' EXIT
-npm run test:e2e
+npm run test:e2e -- "$@"

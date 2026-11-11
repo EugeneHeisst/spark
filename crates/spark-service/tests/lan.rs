@@ -538,3 +538,44 @@ async fn closing_the_sender_socket_cancels_an_unfinished_upload_and_removes_temp
     b.shutdown().await;
     a.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_gateways_repeatedly_discover_the_live_room_over_real_udp() {
+    let a_root = TempDir::new().unwrap();
+    let a = start(a_root.path()).await;
+    let client = client();
+    let response = post(&client, &a, "/api/host")
+        .json(&json!({"name":"Лаборатория Spark","code":"discovery-code","port":39393}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut ws = socket(&a).await;
+    match welcome(&mut ws).await {
+        ServerEvent::Welcome { server_name, .. } => assert_eq!(server_name, "Лаборатория Spark"),
+        _ => unreachable!(),
+    }
+    for attempt in 0..8 {
+        let b_root = TempDir::new().unwrap();
+        let b = start(b_root.path()).await;
+        let response = client
+            .get(format!("{}/api/discovery", b.url))
+            .header("x-spark-token", &b.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let discoveries: Vec<spark_protocol::Discovery> = response.json().await.unwrap();
+        assert!(
+            discoveries
+                .iter()
+                .any(|room| room.name == "Лаборатория Spark"
+                    && room.address.ends_with(":39393")
+                    && room.peers == 1),
+            "attempt {attempt}: {discoveries:?}"
+        );
+        b.shutdown().await;
+    }
+    drop(ws);
+    a.shutdown().await;
+}

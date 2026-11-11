@@ -198,3 +198,5 @@ app.on('before-quit', () => {
   quitting = true;
   if (child && child.exitCode === null) child.kill(process.platform === 'win32' ? undefined : 'SIGINT');
 });
+process.on('SIGTERM', () => app.quit());
+process.on('SIGINT', () => app.quit());

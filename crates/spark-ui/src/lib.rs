@@ -63,6 +63,8 @@ struct App {
     draft: String,
     form: Form,
     discovered: Vec<Discovery>,
+    discovery_generation: u32,
+    discovery_busy: bool,
     error: Option<String>,
     notice: Option<String>,
     modal: Option<String>,
@@ -257,13 +259,6 @@ fn render(app: &AppRef) {
 fn render_onboarding(app: &AppRef) {
     let s = app.borrow();
     let host = s.form.mode == "host";
-    let mut hosts = String::new();
-    for h in &s.discovered {
-        hosts.push_str(&format!("<button class='discovery-item' data-action='select-host' data-id='{}'><span class='discovery-icon'>⌁</span><span><strong>{}</strong><small>{} · участников: {}</small></span><span>↗</span></button>", esc(&h.address), esc(&h.name), esc(&h.address), h.peers));
-    }
-    if hosts.is_empty() {
-        hosts = "<div class='discovery-empty'><span class='signal-icon'>⌁</span>Пока нет доступных комнат<small>Создайте свою или введите адрес вручную</small></div>".into();
-    }
     let content = format!(
         r#"<div class="onboarding"><div class="onboard-info"><div class="brand-lockup"><div class="brand-mark">ϟ</div><span>Spark<span class="wordmark-dot">.</span></span></div><div class="eyebrow"><span class="status-dot"></span> ВАША СЕТЬ. ВАШЕ ПРОСТРАНСТВО.</div><h1>Ближе,<br/>чем кажется<span>.</span></h1><p class="lead">Всё, что нужно для общения.<br/>Прямо в вашей локальной сети.</p><div class="feature-pills"><span>◉ Голос и видео</span><span>▱ Общий экран</span><span>↗ Файлы</span></div><div class="local-note"><span>⌁</span><p><strong>Без облака и регистрации</strong><br/>Один компьютер создаёт комнату.<br/>Остальные подключаются по локальной сети.</p></div><footer>Spark <span>v{version} · Linux / Windows</span></footer></div><section class="onboard-card"><div class="card-heading"><span class="eyebrow">НАЧНЁМ ОБЩЕНИЕ</span><h2>Ваше место в сети</h2><p>Укажите имя и подключитесь к своей команде.</p></div><label class="field">Как вас называть<input id="display-name" data-field="name" data-testid="display-name" autocomplete="nickname" maxlength="64" value="{name}" placeholder="Ваше имя"/></label><div class="tabs"><button class="{join_class}" data-action="mode-join" data-testid="join-tab">Подключиться</button><button class="{host_class}" data-action="mode-host" data-testid="host-tab">Создать комнату</button></div>{fields}<label class="field">Код комнаты<input id="room-code" data-field="code" data-testid="room-code" type="password" minlength="6" maxlength="128" value="{code}" placeholder="Не менее 6 символов" autocomplete="off"/></label><p class="field-help">{help}</p><button class="primary wide" data-action="connect" data-testid="connect" {disabled}>{button}<span>→</span></button>{discovery}<p class="trust-note">Чаты и файлы проходят через создателя комнаты.<br/>Используйте Spark в доверенной локальной сети.</p></section></div><div id="overlay"></div>"#,
         version = esc(&s.version),
@@ -299,7 +294,8 @@ fn render_onboarding(app: &AppRef) {
             String::new()
         } else {
             format!(
-                "<div class='discovery-title'><span>КОМНАТЫ ПОБЛИЗОСТИ</span><button data-action='refresh' title='Обновить комнаты' data-testid='refresh-discovery'>↻</button></div>{hosts}"
+                "<section id='nearby-rooms'>{}</section>",
+                discovery_html(&s.discovered, s.discovery_busy)
             )
         }
     );
@@ -849,6 +845,9 @@ fn action_handler(app: &AppRef, action: &str, id: &str, name: &str) {
             }
             .into();
             render_onboarding(app);
+            if action == "mode-join" {
+                discovery(app);
+            }
         }
         "refresh" => discovery(app),
         "select-host" => {
@@ -1066,22 +1065,104 @@ fn resume_media() {
     }
 }
 
+fn discovery_html(hosts: &[Discovery], busy: bool) -> String {
+    let mut out = format!(
+        "<div class='discovery-title'><span>{}</span><button data-action='refresh' title='Обновить комнаты' data-testid='refresh-discovery' aria-label='Обновить комнаты'>↻</button></div>",
+        if busy {
+            "ИЩЕМ КОМНАТЫ ПОБЛИЗОСТИ…"
+        } else {
+            "КОМНАТЫ ПОБЛИЗОСТИ"
+        }
+    );
+    for h in hosts {
+        out.push_str(&format!("<button class='discovery-item' data-action='select-host' data-id='{}'><span class='discovery-icon'>⌁</span><span><strong>{}</strong><small>{} · участников: {}</small></span><span>↗</span></button>",esc(&h.address),esc(&h.name),esc(&h.address),h.peers));
+    }
+    if hosts.is_empty() {
+        out.push_str("<div class='discovery-empty'><span class='signal-icon'>⌁</span>Пока нет доступных комнат<small>Создайте свою или введите адрес вручную</small></div>");
+    }
+    out
+}
+fn render_discovery(app: &AppRef) {
+    let content = {
+        let s = app.borrow();
+        discovery_html(&s.discovered, s.discovery_busy)
+    };
+    // Discovery is independent from the editable form. A response must never
+    // detach a name/code/address field while the user is typing in it.
+    html("nearby-rooms", &content);
+}
 fn discovery(app: &AppRef) {
-    let token = app.borrow().token.clone();
+    let (token, generation) = {
+        let mut s = app.borrow_mut();
+        if s.conn.is_some() {
+            return;
+        }
+        s.discovery_generation = s.discovery_generation.wrapping_add(1);
+        s.discovery_busy = true;
+        (s.token.clone(), s.discovery_generation)
+    };
+    render_discovery(app);
     let a = app.clone();
     spawn_local(async move {
-        match api::<Vec<Discovery>>(&token, "GET", "/api/discovery", None).await {
+        let result = api::<Vec<Discovery>>(&token, "GET", "/api/discovery", None).await;
+        if a.borrow().discovery_generation != generation {
+            return;
+        }
+        a.borrow_mut().discovery_busy = false;
+        match result {
             Ok(hosts) => {
                 a.borrow_mut().discovered = hosts;
-                if a.borrow().conn.is_none() {
-                    render_onboarding(&a);
+                render_discovery(&a);
+            }
+            Err(e) => {
+                render_discovery(&a);
+                error(&a, e);
+            }
+        }
+        let weak = Rc::downgrade(&a);
+        let refresh = Closure::once_into_js(move || {
+            if let Some(a) = weak.upgrade() {
+                let should_refresh = {
+                    let s = a.borrow();
+                    s.conn.is_none()
+                        && s.form.mode == "join"
+                        && s.discovery_generation == generation
+                };
+                if should_refresh {
+                    discovery(&a);
                 }
             }
-            Err(e) => error(&a, e),
-        }
+        });
+        window()
+            .set_timeout_with_callback_and_timeout_and_arguments_0(refresh.unchecked_ref(), 4000)
+            .ok();
     });
 }
+fn capture_onboarding_fields(app: &AppRef) {
+    let mut values = Vec::new();
+    for field in ["name", "room", "code", "address"] {
+        if let Ok(Some(el)) =
+            document().query_selector(&format!("#spark input[data-field='{field}']"))
+        {
+            if let Ok(input) = el.dyn_into::<HtmlInputElement>() {
+                values.push((field, input.value()));
+            }
+        }
+    }
+    let mut s = app.borrow_mut();
+    for (field, value) in values {
+        match field {
+            "name" => s.form.name = value,
+            "room" => s.form.room = value,
+            "code" => s.form.code = value,
+            "address" => s.form.address = value,
+            _ => {}
+        }
+    }
+}
+
 fn connect(app: &AppRef) {
+    capture_onboarding_fields(app);
     let mut s = app.borrow_mut();
     if s.busy {
         return;

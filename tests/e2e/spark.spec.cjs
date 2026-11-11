@@ -58,6 +58,23 @@ async function assertRemoteVideo(page, peer, kind) {
   return video;
 }
 
+async function retainCapture(page, kind) {
+  await expect.poll(() => page.evaluate(kind => {
+    const track = document.querySelector(`[data-testid="video-local-${kind}"]`)?.srcObject?.getVideoTracks()[0];
+    const state = window.sparkMediaDebug.snapshot();
+    return !!track && state.localTracks.find(t => t.kind === kind)?.id === track.id
+      && state.peers.every(p => p.senders.find(t => t.kind === kind)?.id === track.id);
+  }, kind)).toBe(true);
+  await page.evaluate(kind => {
+    window.sparkTestTracks ||= {};
+    window.sparkTestTracks[kind] = document.querySelector(`[data-testid="video-local-${kind}"]`).srcObject.getVideoTracks()[0];
+  }, kind);
+}
+
+async function captureEnded(page, kind) {
+  await expect.poll(() => page.evaluate(kind => window.sparkTestTracks[kind].readyState, kind)).toBe('ended');
+}
+
 test('two independent desktops: chat, files, actual RTP/video/screen, reconnect and durable history', async ({}, info) => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'spark-e2e-'));
   const clients = [];
@@ -132,6 +149,8 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
     await assertRemoteVideo(b.page, aliceId, 'camera');
     await id(b.page, 'camera').click();
     await assertRemoteVideo(a.page, bobId, 'camera');
+    await retainCapture(a.page, 'camera');
+    await retainCapture(b.page, 'camera');
     await expect.poll(async () => (await stats(b.page)).flatMap(p => p.reports)
       .filter(r => r.type === 'inbound-rtp' && r.kind === 'video').reduce((s, r) => s + (r.framesDecoded || 0), 0)).toBeGreaterThan(3);
     await b.page.screenshot({ path: info.outputPath('03-video-call.png') });
@@ -155,6 +174,7 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
       await expect(windowChoice).toBeVisible();
       await windowChoice.click();
       const screen = await assertRemoteVideo(b.page, aliceId, 'screen');
+      await retainCapture(a.page, 'screen');
       // Decode actual received pixels: count the target's specific green,
       // distinct from the fake camera's pure-green test pattern and black tiles.
       await expect.poll(() => screen.evaluate(video => {
@@ -170,6 +190,7 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
       await expect(id(b.page, `video-${aliceId}-camera`)).toBeVisible();
       await b.page.screenshot({ path: info.outputPath('04-real-screen-and-camera.png') });
       await id(a.page, 'screen').click();
+      await captureEnded(a.page, 'screen');
       await expect(id(b.page, `video-${aliceId}-screen`)).toHaveCount(0);
       await a.app.evaluate(() => { global.sparkCaptureTest?.destroy(); delete global.sparkCaptureTest; });
     }
@@ -183,9 +204,11 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
     const audioBeforeRestart = inbound(await stats(b.page), 'audio');
     await expect.poll(async () => inbound(await stats(b.page), 'audio')).toBeGreaterThan(audioBeforeRestart + 200);
     await id(a.page, 'leave-voice').click();
+    await captureEnded(a.page, 'camera');
     await expect.poll(async () => (await snapshot(a.page)).localTracks.length).toBe(0);
     await expect.poll(async () => (await snapshot(b.page)).peers.length).toBe(0);
     await id(b.page, 'leave-voice').click();
+    await captureEnded(b.page, 'camera');
     await expect.poll(async () => (await snapshot(b.page)).localTracks.length).toBe(0);
     await id(a.page, 'channel-lounge').click(); await id(b.page, 'channel-lounge').click();
     await expect.poll(async () => inbound(await stats(b.page), 'audio')).toBeGreaterThan(200);
@@ -207,6 +230,7 @@ test('two independent desktops: chat, files, actual RTP/video/screen, reconnect 
     await id(b.page, 'save-settings').click();
     await expect(a.page.locator('#members')).toContainText('Борис Новый');
     await id(a.page, 'channel-general').click();
+    await id(b.page, 'channel-general').click();
     await send(b.page, 'Новое имя после переподключения');
     await expect(a.page.locator('#message-list')).toContainText('Новое имя после переподключения');
     await expect(a.page.locator('#members .member')).toHaveCount(2);
