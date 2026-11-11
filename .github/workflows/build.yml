@@ -37,14 +37,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          apt_options=(-o DPkg::Lock::Timeout=60 -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          # The hosted image's mirror+file selector chose an unreachable Azure
+          # HTTP mirror. Scope this job to official Ubuntu HTTPS repositories.
+          cat > "${RUNNER_TEMP}/spark-ubuntu.list" <<'SOURCES'
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse
+          SOURCES
+          apt_options=(-o DPkg::Lock::Timeout=60 -o Acquire::Retries=2 -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Languages=none -o APT::Update::Error-Mode=any -o "Dir::Etc::sourcelist=${RUNNER_TEMP}/spark-ubuntu.list" -o Dir::Etc::sourceparts=-)
           packages=(libgtk-3-0 libnss3 libasound2t64 libgbm1 libxss1 libxtst6 xvfb openbox dbus-x11)
-          # Hosted images already contain most desktop libraries and package
-          # indexes. Avoid refreshing unrelated repositories on the fast path.
-          if ! sudo timeout --kill-after=10s 120s apt-get "${apt_options[@]}" install --no-install-recommends -y "${packages[@]}"; then
-            sudo timeout --kill-after=10s 120s apt-get "${apt_options[@]}" update
-            sudo timeout --kill-after=10s 180s apt-get "${apt_options[@]}" install --no-install-recommends -y "${packages[@]}"
-          fi
+          sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a timeout --kill-after=10s 120s apt-get "${apt_options[@]}" update
+          sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a timeout --kill-after=10s 180s apt-get "${apt_options[@]}" install --no-install-recommends -y "${packages[@]}"
       - run: npm ci --no-audit --no-fund
       - name: WebAssembly bindings compiler
         run: python scripts/install-bindgen.py
