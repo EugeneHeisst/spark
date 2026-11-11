@@ -6,6 +6,9 @@
 let fs;
 try { fs = require('original-fs'); } catch { fs = require('node:fs'); }
 const fsp = fs.promises;
+// Bundled source is the one exception: __dirname is inside app.asar in a
+// packaged app, so reading this resource requires Electron's virtual fs.
+const bundledFsp = require('node:fs').promises;
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { Readable, Transform } = require('node:stream');
@@ -301,7 +304,7 @@ function createInternal(options, transport, test = {}) {
         jobFile = path.join(cache, 'pending.json');
         await fsp.writeFile(jobFile, JSON.stringify(job), { mode: 0o600 });
         const helper = path.join(cache, platform === 'win32' ? 'install.ps1' : 'update-helper.cjs');
-        await fsp.writeFile(helper, platform === 'win32' ? powershellScript : await fsp.readFile(path.join(__dirname, 'update-helper.cjs')), { mode: 0o600 });
+        await fsp.writeFile(helper, platform === 'win32' ? powershellScript : await bundledFsp.readFile(path.join(__dirname, 'update-helper.cjs')), { mode: 0o600 });
         const processHandle = platform === 'win32'
           ? spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helper, '-JobFile', jobFile], { detached: true, windowsHide: true, stdio: 'ignore', cwd: cache })
           : spawn(execPath, [helper, jobFile], { detached: true, stdio: 'ignore', cwd: cache, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });

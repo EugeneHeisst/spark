@@ -279,6 +279,42 @@ async function runHelperFixture(t, success) {
 test('native helper atomically replaces an actual directory after startup acknowledgement (paths with spaces)', async t => runHelperFixture(t, true));
 test('native helper restores and relaunches actual old files if startup fails', async t => runHelperFixture(t, false));
 
+test('updater loaded from a real app.asar starts its bundled install helper', { skip: process.platform !== 'linux' || !process.versions.electron }, async t => {
+  const root = await temporary(t), appInput = path.join(root, 'asar app input'), archive = path.join(root, 'app.asar');
+  await fsp.mkdir(path.join(appInput, 'desktop'), { recursive: true });
+  for (const file of ['updater.cjs', 'update-helper.cjs']) {
+    await fsp.copyFile(path.resolve(__dirname, '../../desktop', file), path.join(appInput, 'desktop', file));
+  }
+  await asar.createPackage(appInput, archive);
+  // Resolve actual installed production dependencies without repacking a
+  // second npm tree. The updater and its bundled helper live inside real asar.
+  const previousNodePath = process.env.NODE_PATH;
+  process.env.NODE_PATH = path.resolve(__dirname, '../../node_modules');
+  require('node:module').Module._initPaths();
+  t.after(() => {
+    if (previousNodePath === undefined) delete process.env.NODE_PATH; else process.env.NODE_PATH = previousNodePath;
+    require('node:module').Module._initPaths();
+  });
+  const bundled = require(path.join(archive, 'desktop', 'updater.cjs'));
+  const installDir = path.join(root, 'actual Electron install');
+  await fsp.cp(path.dirname(process.execPath), installDir, { recursive: true, mode: fs.constants.COPYFILE_FICLONE });
+  const bytes = await fixtureArchive(root), server = await releaseServer(t, bytes);
+  const profile = path.join(root, 'profile'); let beforeInstall = 0;
+  const instance = bundled._testing.createUpdater({ app: app(root), platform: 'linux', beforeInstall: async () => {
+    const job = JSON.parse(await fsp.readFile(path.join(profile, 'updates', 'pending.json'), 'utf8'));
+    assert.equal(fs.existsSync(job.started), true, 'the real helper must start before stopping the current app');
+    beforeInstall++;
+    throw new Error('Intentional regression-test abort before quitting the app');
+  } }, server.transport, { execPath: path.join(installDir, path.basename(process.execPath)) });
+  await instance.check(); assert.equal(instance.status().state, 'ready');
+  await assert.rejects(instance.install(), /Intentional regression-test abort/);
+  assert.equal(beforeInstall, 1);
+  assert.equal(await fsp.readFile(path.join(profile, 'updates', 'update-helper.cjs'), 'utf8'), await fsp.readFile(path.resolve(__dirname, '../../desktop/update-helper.cjs'), 'utf8'));
+  for (let i = 0; i < 60 && fs.existsSync(path.join(profile, 'updates', 'pending.json')); i++) await new Promise(r => setTimeout(r, 50));
+  assert.equal(fs.existsSync(path.join(profile, 'updates', 'pending.json')), false, 'the cancelled helper must exit and clean up');
+  assert.equal((await fsp.readdir(root)).some(name => name.startsWith('.spark-update-')), false);
+});
+
 test('real Electron fs validates physical asar archives and helper replaces its mapped runtime', { skip: process.platform !== 'linux' || !!process.versions.electron }, async t => {
   const electron = require('electron');
   const testEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
@@ -287,7 +323,7 @@ test('real Electron fs validates physical asar archives and helper replaces its 
   let diagnostics = '';
   underElectron.stdout.on('data', b => { diagnostics += b; }); underElectron.stderr.on('data', b => { diagnostics += b; });
   assert.equal((await once(underElectron, 'exit'))[0], 0, diagnostics);
-  assert.match(diagnostics, /tests 14/, 'the nested suite must actually execute under Electron');
+  assert.match(diagnostics, /tests 15/, 'the nested suite must actually execute under Electron');
   const root = await temporary(t), token = 'b'.repeat(48), installDir = path.join(root, 'old Electron with spaces');
   const stage = path.join(root, `.spark-update-${token}`), source = path.join(stage, 'Spark');
   await fsp.cp(path.dirname(electron), installDir, { recursive: true, mode: fs.constants.COPYFILE_FICLONE });
