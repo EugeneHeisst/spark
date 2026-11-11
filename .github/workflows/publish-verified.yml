@@ -1,0 +1,193 @@
+name: Publish existing verified packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows_run:
+        description: Successful Windows build job run ID
+        required: true
+        default: '43043486238'
+      linux_run:
+        description: Successful Linux build job run ID
+        required: true
+        default: '43046329617'
+      app_commit:
+        description: Full SHA of the verified application code
+        required: true
+        default: '9abc2b55e51d85b1f8ac4bb8cfc59c4ad26d09d0'
+      tag:
+        description: Release tag matching package.json (vX.Y.Z)
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-verified-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      WINDOWS_RUN: ${{ inputs.windows_run }}
+      LINUX_RUN: ${{ inputs.linux_run }}
+      APP_COMMIT: ${{ inputs.app_commit }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate inputs, successful platform jobs and application code
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          def api(endpoint):
+              return json.loads(subprocess.check_output(["gh", "api", endpoint], text=True))
+
+          repo = os.environ["GH_REPO"]
+          commit = os.environ["APP_COMMIT"].lower()
+          tag = os.environ["RELEASE_TAG"]
+          require(re.fullmatch(r"[0-9a-f]{40}", commit), "app_commit must be a full commit SHA")
+          require(re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag),
+                  "tag must be a stable semantic version: vX.Y.Z")
+          version = json.loads(Path("package.json").read_text())["version"]
+          require(tag == "v" + version, "tag does not match package.json version")
+          require(Path("RELEASE_NOTES.md").is_file(), "RELEASE_NOTES.md is missing")
+          require(api(f"repos/{repo}")["private"], "This workflow only publishes to a private repository")
+
+          heads = {os.environ["GITHUB_SHA"]}
+          for variable, job_name in [("WINDOWS_RUN", "build (windows-2025)"),
+                                     ("LINUX_RUN", "build (ubuntu-24.04)")]:
+              run_id = os.environ[variable]
+              require(re.fullmatch(r"[1-9][0-9]*", run_id), f"{variable} must be a numeric run ID")
+              run = api(f"repos/{repo}/actions/runs/{run_id}")
+              require(run["head_repository"]["full_name"] == repo, "Build came from another repository")
+              require(run["path"] == ".github/workflows/build.yml", "Run must use the Spark build workflow")
+              require(run["status"] == "completed", f"Run {run_id} is still in progress")
+              pages = json.loads(subprocess.check_output([
+                  "gh", "api", "--paginate", "--slurp",
+                  f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"], text=True))
+              jobs = [job for page in pages for job in page["jobs"] if job["name"] == job_name]
+              require(len(jobs) == 1 and jobs[0]["conclusion"] == "success",
+                      f"Run {run_id} needs a successful {job_name} job")
+              # The Windows run may be cancelled overall after its Windows job
+              # succeeded; trust the required platform job, not run.conclusion.
+              require(jobs[0]["head_sha"] == run["head_sha"], "Job and run SHAs differ")
+              require(re.fullmatch(r"[0-9a-f]{40}", run["head_sha"]), "Invalid build head SHA")
+              heads.add(run["head_sha"])
+
+          subprocess.run(["git", "fetch", "--no-tags", "origin", *sorted(heads | {commit})], check=True)
+          checkout = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          require(checkout == os.environ["GITHUB_SHA"], "Checkout does not match the publishing commit")
+          for head in sorted(heads):
+              changed = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z", commit, head, "--"])
+              paths = [path.decode() for path in changed.split(b"\0") if path]
+              forbidden = [path for path in paths if not (
+                  path.startswith(".github/") or path in {"README.md", "RELEASE_NOTES.md"})]
+              require(not forbidden, f"Application code differs from {commit} at {head}: {forbidden}")
+          print("Platform jobs passed; both build SHAs and publishing HEAD match the verified application code.")
+          PY
+
+      - name: Download verified Windows packages
+        uses: actions/download-artifact@v4
+        with:
+          name: spark-Windows
+          run-id: ${{ inputs.windows_run }}
+          github-token: ${{ github.token }}
+          path: release-assets
+
+      - name: Download verified Linux packages
+        uses: actions/download-artifact@v4
+        with:
+          name: spark-Linux
+          run-id: ${{ inputs.linux_run }}
+          github-token: ${{ github.token }}
+          path: release-assets
+
+      - name: Verify four packages and generate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          version = os.environ["RELEASE_TAG"][1:]
+          directory = Path("release-assets")
+          expected = {f"Spark-{version}-linux-x86_64.AppImage", f"Spark-{version}-linux-x64.tar.gz",
+                      f"Spark-{version}-windows-setup.exe", f"Spark-{version}-windows-x64.zip"}
+          if {path.name for path in directory.iterdir()} != expected:
+              raise SystemExit("Downloaded artifact filenames do not match the four expected packages")
+          checksums = []
+          for name in sorted(expected):
+              path = directory / name
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f"Missing or empty package: {name}")
+              digest = hashlib.sha256()
+              with path.open("rb") as source:
+                  for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              checksums.append(f"{digest.hexdigest()}  {name}\n")
+          (directory / "SHA256SUMS").write_text("".join(checksums))
+          sizes = {path.name: path.stat().st_size for path in directory.iterdir()}
+          (Path(os.environ["RUNNER_TEMP"]) / "spark-release-sizes.json").write_text(json.dumps(sizes))
+          print("".join(checksums), end="")
+          PY
+
+      - name: Stage release as draft and upload packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          if draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            if [[ "$draft" != true ]]; then
+              echo 'Refusing to modify an already published release.' >&2
+              exit 1
+            fi
+            gh release edit "$RELEASE_TAG" --draft=true --target "$GITHUB_SHA" \
+              --title "Spark $RELEASE_TAG" --notes-file RELEASE_NOTES.md
+          else
+            gh release create "$RELEASE_TAG" --draft --target "$GITHUB_SHA" \
+              --title "Spark $RELEASE_TAG" --notes-file RELEASE_NOTES.md
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
+
+      - name: Verify uploaded names and sizes before publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --json isDraft,assets > "$RUNNER_TEMP/spark-release.json"
+          python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          temporary = Path(os.environ["RUNNER_TEMP"])
+          expected = json.loads((temporary / "spark-release-sizes.json").read_text())
+          release = json.loads((temporary / "spark-release.json").read_text())
+          uploaded = {asset["name"]: asset["size"] for asset in release["assets"]}
+          if not release["isDraft"] or uploaded != expected:
+              raise SystemExit("Release must remain draft until every expected asset has the correct name and size")
+          print("All four packages and SHA256SUMS are uploaded with matching sizes.")
+          PY
+          gh release edit "$RELEASE_TAG" --draft=false
+          gh release view "$RELEASE_TAG" --json url,isDraft
