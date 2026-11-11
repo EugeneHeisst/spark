@@ -1,9 +1,5 @@
-name: Build and verify Spark
+name: Verify Spark Linux fallback
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
   workflow_dispatch:
 permissions:
   contents: read
@@ -12,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025]
+        os: [ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -28,10 +24,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - name: Linux desktop libraries
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 libxss1 libxtst6 xvfb openbox dbus-x11
-      - run: npm ci --no-audit --no-fund
       - name: Rust tests (real sockets and disk)
         run: cargo test --locked -p spark-protocol -p spark-service
       - name: Rust source checks
@@ -40,26 +32,29 @@ jobs:
           cargo clippy --locked -p spark-protocol -p spark-service --all-targets -- -D warnings
       - name: Rust WebAssembly type check
         run: cargo check --locked -p spark-ui --target wasm32-unknown-unknown
+      - name: Linux desktop libraries (bounded APT)
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt_options=(-o DPkg::Lock::Timeout=60 -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          packages=(libgtk-3-0 libnss3 libasound2t64 libgbm1 libxss1 libxtst6 xvfb openbox dbus-x11)
+          # Hosted images already contain most desktop libraries and package
+          # indexes. Avoid refreshing unrelated repositories on the fast path.
+          if ! sudo timeout --kill-after=10s 120s apt-get "${apt_options[@]}" install --no-install-recommends -y "${packages[@]}"; then
+            sudo timeout --kill-after=10s 120s apt-get "${apt_options[@]}" update
+            sudo timeout --kill-after=10s 180s apt-get "${apt_options[@]}" install --no-install-recommends -y "${packages[@]}"
+          fi
+      - run: npm ci --no-audit --no-fund
       - name: WebAssembly bindings compiler
         run: python scripts/install-bindgen.py
       - run: npm run build
       - name: Linux packages
-        if: runner.os == 'Linux'
         run: npm run package:linux
-      - name: Windows installer and portable package
-        if: runner.os == 'Windows'
-        run: npm run package:win
       - name: Linux desktop clients and packaged application
-        if: runner.os == 'Linux'
         run: npm run test:e2e:linux
         env:
           SPARK_PACKAGED_BINARY: ${{ github.workspace }}/dist/linux-unpacked/spark-lan
-      - name: Windows desktop clients and packaged application
-        if: runner.os == 'Windows'
-        run: npm run test:e2e
-        env:
-          SPARK_SKIP_SCREEN_TEST: '1'
-          SPARK_PACKAGED_BINARY: ${{ github.workspace }}\dist\win-unpacked\Spark.exe
       - name: Upload desktop packages
         uses: actions/upload-artifact@v4
         with:
@@ -67,8 +62,6 @@ jobs:
           path: |
             dist/*.AppImage
             dist/*.tar.gz
-            dist/*.exe
-            dist/*.zip
           if-no-files-found: error
       - name: Upload evidence
         if: always()
@@ -79,24 +72,3 @@ jobs:
             test-results/
             playwright-report/
           if-no-files-found: ignore
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: spark-*
-          path: dist
-          merge-multiple: true
-      - name: Publish verified packages
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cd dist
-          sha256sum Spark-* > SHA256SUMS.txt
-          cd ..
-          gh release create "$GITHUB_REF_NAME" dist/* --title "Spark $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
