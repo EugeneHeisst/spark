@@ -5,6 +5,13 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platforms to build and verify
+        type: choice
+        required: true
+        default: all
+        options: [all, linux, windows]
 permissions:
   contents: read
 jobs:
@@ -12,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025]
+        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.platform == 'linux' && '["ubuntu-24.04"]' || github.event_name == 'workflow_dispatch' && inputs.platform == 'windows' && '["windows-2025"]' || '["ubuntu-24.04","windows-2025"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -30,7 +37,7 @@ jobs:
           cache-on-failure: true
       - name: Linux desktop libraries (bounded APT)
         if: runner.os == 'Linux'
-        timeout-minutes: 8
+        timeout-minutes: 10
         shell: bash
         run: |
           set -euo pipefail
@@ -52,15 +59,51 @@ jobs:
             echo 'Desktop libraries, Xvfb and window manager are already available.'
             exit 0
           fi
-          # Bound all network operations and use official Ubuntu HTTPS mirrors.
-          cat > "${RUNNER_TEMP}/spark-ubuntu.list" <<'SOURCES'
-          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
-          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
-          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse
+          echo "Missing desktop packages: ${packages[*]}"
+          apt_options=(-o DPkg::Lock::Timeout=30 -o Acquire::Retries=1 -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Languages=none -o APT::Update::Error-Mode=any)
+          apt_command() {
+            local seconds=$1; shift
+            sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a timeout --kill-after=10s "${seconds}s" apt-get "${apt_options[@]}" "$@"
+          }
+          # The image ships signed package lists and configured Ubuntu mirrors.
+          # Try them before making an unrelated apt-update DNS failure fatal.
+          # Download separately: network timeouts must not interrupt dpkg.
+          if apt_command 60 --download-only install --no-install-recommends -y "${packages[@]}"; then
+            apt_command 120 --no-download install --no-install-recommends -y "${packages[@]}"
+            exit 0
+          fi
+          # Exact hosted-image mirror setup (Azure first, archive/security next):
+          # https://github.com/actions/runner-images/blob/ubuntu24/20261101.360/images/ubuntu/scripts/build/configure-apt-sources.sh
+          # Scope fallbacks to this job; preserve system sources, trust and DNS.
+          installed=false
+          for mirror in azure archive; do
+            source_dir="${RUNNER_TEMP}/spark-apt-${mirror}"
+            mkdir -p "${source_dir}/lists/partial"
+            if [[ "$mirror" == azure ]]; then
+              primary=https://azure.archive.ubuntu.com/ubuntu
+              security=$primary
+            else
+              primary=https://archive.ubuntu.com/ubuntu
+              security=https://security.ubuntu.com/ubuntu
+            fi
+            cat > "${source_dir}/ubuntu.list" <<SOURCES
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $primary noble main restricted universe multiverse
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $primary noble-updates main restricted universe multiverse
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $security noble-security main restricted universe multiverse
           SOURCES
-          apt_options=(-o DPkg::Lock::Timeout=60 -o Acquire::Retries=2 -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Languages=none -o APT::Update::Error-Mode=any -o "Dir::Etc::sourcelist=${RUNNER_TEMP}/spark-ubuntu.list" -o Dir::Etc::sourceparts=-)
-          sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a timeout --kill-after=10s 120s apt-get "${apt_options[@]}" update
-          sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a timeout --kill-after=10s 180s apt-get "${apt_options[@]}" install --no-install-recommends -y "${packages[@]}"
+            source_options=(-o "Dir::Etc::sourcelist=${source_dir}/ubuntu.list" -o Dir::Etc::sourceparts=- -o "Dir::State::lists=${source_dir}/lists")
+            echo "Trying signed Ubuntu HTTPS source: $primary"
+            if apt_command 75 "${source_options[@]}" update &&
+               apt_command 90 "${source_options[@]}" --download-only install --no-install-recommends -y "${packages[@]}"; then
+              apt_command 120 "${source_options[@]}" --no-download install --no-install-recommends -y "${packages[@]}"
+              installed=true
+              break
+            fi
+          done
+          if [[ "$installed" != true ]]; then
+            echo 'Could not obtain required desktop packages from signed Ubuntu sources.' >&2
+            exit 1
+          fi
       - run: npm ci --no-audit --no-fund
       - name: Update validation and installation tests
         run: node --test tests/update/*.test.cjs
@@ -111,7 +154,7 @@ jobs:
             playwright-report/
           if-no-files-found: ignore
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.platform == 'all')
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
