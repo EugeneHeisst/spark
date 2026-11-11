@@ -1,0 +1,27 @@
+[package]
+name = "spark-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+spark-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+axum = { version = "=0.8.9", features = ["ws", "json", "http1", "tokio"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
+tokio-tungstenite = "0.28"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+socket2 = { version = "0.6", features = ["all"] }
+tower-http = { version = "0.6", features = ["fs"] }
+url = "2"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"

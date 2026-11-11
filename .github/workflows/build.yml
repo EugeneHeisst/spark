@@ -1,0 +1,93 @@
+name: Build and verify Spark
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux desktop libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libnss3 libasound2t64 libgbm1 libxss1 libxtst6 xvfb
+      - run: npm ci --no-audit --no-fund
+      - name: Rust tests (real sockets and disk)
+        run: cargo test --locked -p spark-protocol -p spark-service
+      - name: Rust WebAssembly type check
+        run: cargo check --locked -p spark-ui --target wasm32-unknown-unknown
+      - name: WebAssembly bindings compiler
+        run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      - run: npm run build
+      - name: Two desktop clients on an isolated display
+        if: runner.os == 'Linux'
+        run: xvfb-run -a -s '-screen 0 1600x1000x24' npm run test:e2e
+      - name: Two Windows desktop clients (synthetic input devices)
+        if: runner.os == 'Windows'
+        run: npm run test:e2e
+        env:
+          SPARK_SKIP_SCREEN_TEST: '1'
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: npm run package:linux
+      - name: Windows installer and portable package
+        if: runner.os == 'Windows'
+        run: npm run package:win
+      - name: Upload desktop packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: spark-${{ runner.os }}
+          path: |
+            dist/*.AppImage
+            dist/*.tar.gz
+            dist/*.exe
+            dist/*.zip
+          if-no-files-found: error
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-${{ runner.os }}
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: spark-*
+          path: dist
+          merge-multiple: true
+      - name: Publish verified packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum Spark-* > SHA256SUMS.txt
+          cd ..
+          gh release create "$GITHUB_REF_NAME" dist/* --title "Spark $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md

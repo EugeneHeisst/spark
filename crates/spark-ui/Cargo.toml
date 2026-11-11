@@ -1,0 +1,31 @@
+[package]
+name = "spark-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+spark-protocol.workspace = true
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = [
+  "Window", "Document", "Element", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement",
+  "HtmlSelectElement", "HtmlMediaElement", "HtmlVideoElement", "Node", "NodeList", "Event", "EventTarget",
+  "KeyboardEvent", "MessageEvent", "CloseEvent", "ErrorEvent", "MouseEvent", "Location",
+  "Request", "RequestInit", "RequestMode", "Response", "Headers", "WebSocket", "BinaryType",
+  "File", "FileList", "Blob", "XmlHttpRequest", "XmlHttpRequestUpload", "XmlHttpRequestEventTarget",
+  "ProgressEvent", "DomTokenList", "Storage", "Navigator", "MediaDevices", "MediaStream", "MediaStreamTrack",
+  "MediaStreamConstraints", "DisplayMediaStreamConstraints", "RtcPeerConnection", "RtcConfiguration",
+  "RtcIceCandidate", "RtcIceCandidateInit", "RtcPeerConnectionIceEvent", "RtcSdpType",
+  "RtcSessionDescriptionInit", "RtcSignalingState", "RtcPeerConnectionState", "RtcIceConnectionState",
+  "RtcRtpSender", "RtcRtpReceiver", "RtcRtpTransceiver", "RtcRtpTransceiverInit",
+  "RtcRtpTransceiverDirection", "RtcTrackEvent", "RtcStatsReport", "console"
+] }

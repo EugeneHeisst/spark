@@ -1,0 +1,11 @@
+/target/
+/node_modules/
+/dist/
+/assets/pkg/
+/desktop/binaries/
+/test-results/
+/playwright-report/
+/artifacts/
+*.log
+.DS_Store
+
