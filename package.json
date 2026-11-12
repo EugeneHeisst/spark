@@ -1,6 +1,6 @@
 {
   "name": "spark-lan",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Spark — локальные чаты, звонки и файлы",
   "private": true,
   "author": "EugeneHeisst",
