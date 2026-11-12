@@ -2,12 +2,12 @@
 
 Rust service + Rust/WASM UI (Leptos 0.8 CSR, web-sys media), thin Electron shell for the same Chromium WebRTC on Linux and Windows. No cloud/STUN/TURN, no accounts. Every client has its own loopback service; one starts a LAN host. Rooms/chat/history/files run through the host; encrypted WebRTC media is peer-to-peer. A trusted LAN is assumed for host HTTP/WebSocket chat and file transport; room code controls joining, it is not end-to-end encryption.
 
-## Ownership
+## Modules
 
-- `spark-protocol`: shared JSON contract, owned by backend agent.
-- `spark-service`: Tokio/Axum native executable, SQLite, LAN discovery, network proxy, streaming files, owned by backend agent.
-- `spark-ui`: Leptos Rust/WASM UI, owned by UI agent except `media.rs` owned by media agent.
-- Electron shell, builds, packaging and cross-client end-to-end verification owned by root.
+- `spark-protocol`: shared JSON contract.
+- `spark-service`: Tokio/Axum native executable, SQLite, LAN discovery, network proxy, streaming files.
+- `spark-ui`: Leptos Rust/WASM UI; `media.rs` implements WebRTC and media lifecycle.
+- Electron shell: desktop integration, builds and packaging; end-to-end tests verify cross-client interactions.
 
 ## Frozen JSON contract
 
@@ -60,7 +60,7 @@ LAN API routes are backend implementation details. Shared room code authorizes c
 
 ## Media Rust module contract
 
-`MediaManager` uses Rc internals (Clone), shared Rust-only public functions, no JS app implementation. UI agent and media agent finalize exact callbacks together. Requirements: no STUN/TURN (`iceServers:[]`), one connection per voice-room peer, polite perfect negotiation or deterministic initiator with queued ICE, audio/camera/screen tracks separately negotiated, mic mute, deafen, camera toggle, screen stop on browser-ended event, end-call stops all tracks/closes peers. Screen and camera can coexist. Remote stream keyed by peer and stream kind. Bounded errors exposed in UI; no silent dead buttons. Incoming invites ask user before starting mic/camera.
+`MediaManager` uses Rc internals (Clone), shared Rust-only public functions, no JS app implementation. Requirements: no STUN/TURN (`iceServers:[]`), one connection per voice-room peer, polite perfect negotiation or deterministic initiator with queued ICE, audio/camera/screen tracks separately negotiated, mic mute, deafen, camera toggle, screen stop on browser-ended event, end-call stops all tracks/closes peers. Screen and camera can coexist. Remote stream keyed by peer and stream kind. Bounded errors exposed in UI; no silent dead buttons. Incoming invites ask user before starting mic/camera.
 
 Electron preload `window.sparkDesktop`:
 - `sources()` -> Promise array `{id,name,thumbnail}` for a source picker.
@@ -73,4 +73,4 @@ For ordinary browser test fallback, screen capture uses browser picker and files
 
 Russian UI, polished dark Discord-like three-column desktop layout, amber/orange Spark accent, responsive at1000x700. Host/join onboarding with display name, room name/code, discovered hosts and manual IP. Channels/text, message composer Enter/Shift+Enter, member list, file picker and progress/errors. Voice panel with mute/deafen/camera/screen/end controls, local/remote video tiles and actual connection state. Source selection, invites, clear disconnect and rejoin. Settings name + local address details; no fake people/chats or placeholder buttons in production.
 
-E2E uses two independent Rust services/data dirs and real browser/Electron contexts over host network sockets: chat both directions/persistence, file bytes+SHA256, voice RTP, camera video frames, screen capture through Xvfb actual display (synthetic test desktop), mute/stop/rejoin/cleanup. Fake input devices only explicit unpackaged test flags; never capture user's live desktop during automated testing. Native unit/integration tests cover bad codes, stale peer cleanup, validation/path traversal, atomic file commit and transfer hash. Linux builds locally, Windows CI builds/tests/installers. Release unsigned installers/assets in a PRIVATE GitHub repo; no public publishing of user projects.
+E2E uses two independent Rust services/data dirs and real browser/Electron contexts over host network sockets: chat both directions/persistence, file bytes+SHA256, voice RTP, camera video frames, screen capture through Xvfb actual display (synthetic test desktop), mute/stop/rejoin/cleanup. Fake input devices only explicit unpackaged test flags; never capture user's live desktop during automated testing. Native unit/integration tests cover bad codes, stale peer cleanup, validation/path traversal, atomic file commit and transfer hash. Linux builds locally, Windows CI builds/tests/installers. Installers are currently unsigned.
