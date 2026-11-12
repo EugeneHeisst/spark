@@ -173,7 +173,7 @@ test('preferences: themes, accent, native zoom, event audio, durable settings an
     await id(page, 'pref-compact').check();
     await setPreference(page, 'pref-volume', 35);
 
-    const cues = ['connect', 'disconnect', 'notification', 'invite', 'mic-on', 'mic-off', 'sound-on', 'sound-off'];
+    const cues = ['peer-join', 'peer-leave', 'connect', 'disconnect', 'notification', 'invite', 'mic-on', 'mic-off', 'sound-on', 'sound-off'];
     const decoded = await page.evaluate(async cues => {
       const context = new AudioContext();
       try {
@@ -219,7 +219,9 @@ test('preferences: themes, accent, native zoom, event audio, durable settings an
     await id(page, 'pref-sounds').uncheck();
     await id(page, 'pref-tray').uncheck();
     await id(page, 'pref-updates').uncheck();
-    const saved = { theme: 'midnight', accent: '#5ca9ff', zoom: 125, sounds: false,
+    await id(page, 'pref-noise').uncheck();
+    await id(page, 'pref-share-audio').uncheck();
+    const saved = { noise_suppression: false, share_audio: false, peer_volumes: {}, theme: 'midnight', accent: '#5ca9ff', zoom: 125, sounds: false,
       volume: 35, close_to_tray: false, compact: true, auto_updates: false };
     await expect.poll(async () => {
       try { return JSON.parse(await fs.readFile(path.join(directory, 'preferences.json'), 'utf8')); }
@@ -554,6 +556,205 @@ test('three desktops: all six voice paths and isolation between voice channels',
   } finally {
     for (const { app } of clients.reverse()) await app.close().catch(() => {});
     await fs.writeFile(info.outputPath('renderer-errors.json'), JSON.stringify(errors, null, 2));
+    await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+
+test('voice controls: participant cues, speech activity, live noise suppression and independent stream volume', async ({}, info) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'spark-audio-controls-'));
+  const clients = [], errors = [];
+  try {
+    const a = await launch(path.join(temporary, 'a'), path.join(temporary, 'saved-a'), errors); clients.push(a);
+    const b = await launch(path.join(temporary, 'b'), path.join(temporary, 'saved-b'), errors); clients.push(b);
+    await id(a.page, 'settings').click();
+    await id(a.page, 'pref-noise').uncheck();
+    await a.page.locator('.modal-close').click();
+    await a.page.evaluate(() => {
+      const capture = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      window.sparkTestMicrophones = [];
+      navigator.mediaDevices.getUserMedia = async constraints => {
+        const stream = await capture(constraints);
+        window.sparkTestMicrophones.push(...stream.getAudioTracks());
+        return stream;
+      };
+    });
+    await connect(a.page, 'Говорящий', true);
+    await connect(b.page, 'Слушатель', false);
+    await id(a.page, 'channel-lounge').click();
+    await observeEventAudio(a.page);
+    await id(b.page, 'channel-lounge').click();
+    await assertPlayedCue(a.page, 'peer-join');
+    const alice = (await snapshot(a.page)).selfId;
+    const bob = (await snapshot(b.page)).selfId;
+    await expect.poll(async () => inbound(await stats(b.page), 'audio')).toBeGreaterThan(200);
+    const localSpeaking = a.page.locator(`.audio-person[data-speaker="${alice}"]`);
+    const remoteSpeaking = b.page.locator(`.audio-person[data-speaker="${alice}"]`);
+    await expect(localSpeaking).toHaveClass(/speaking/);
+    await expect(remoteSpeaking).toHaveClass(/speaking/);
+    await id(a.page, 'mute').click();
+    await expect(localSpeaking).not.toHaveClass(/speaking/);
+    await expect(remoteSpeaking).not.toHaveClass(/speaking/);
+    await id(a.page, 'mute').click();
+    await expect(remoteSpeaking).toHaveClass(/speaking/);
+
+    const micBefore = (await snapshot(a.page)).localTracks.find(t => t.kind === 'audio');
+    expect(micBefore.settings.noiseSuppression).toBe(false);
+    await id(a.page, 'settings').click();
+    await id(a.page, 'pref-noise').check();
+    await expect.poll(async () => (await snapshot(a.page)).localTracks.find(t => t.kind === 'audio')?.settings.noiseSuppression).toBe(true);
+    await id(a.page, 'pref-noise').uncheck();
+    await expect.poll(() => a.page.evaluate(() => window.sparkDesktop.getSettings())).toMatchObject({ noise_suppression: false });
+    await fs.writeFile(info.outputPath('noise-disabled.json'), JSON.stringify(await snapshot(a.page), null, 2));
+    expect(await a.page.evaluate(() => window.sparkTestMicrophones.slice(0, -1).every(t => t.readyState === 'ended'))).toBe(true);
+    await expect.poll(async () => (await snapshot(a.page)).localTracks.find(t => t.kind === 'audio')?.settings.noiseSuppression).toBe(false);
+    expect((await snapshot(a.page)).localTracks.find(t => t.kind === 'audio').enabled).toBe(true);
+    expect((await snapshot(a.page)).peers[0].connectionState).toBe('connected');
+    await id(a.page, 'pref-noise').check();
+    await expect.poll(async () => (await snapshot(a.page)).localTracks.find(t => t.kind === 'audio')?.settings.noiseSuppression).toBe(true);
+    await a.page.locator('.modal-close').click();
+
+    // Synthetic video + PCM at the device boundary, with real encoding, RTP,
+    // remote decoding and playback. No desktop or system audio is captured.
+    await a.page.evaluate(() => {
+      const context = new AudioContext();
+      const tone = context.createOscillator(); tone.frequency.value = 523;
+      const gain = context.createGain(); gain.gain.value = 0.15;
+      const destination = context.createMediaStreamDestination();
+      tone.connect(gain).connect(destination); tone.start();
+      const canvas = document.createElement('canvas'); canvas.width = 320; canvas.height = 180;
+      canvas.getContext('2d').fillRect(0, 0, 320, 180);
+      const stream = canvas.captureStream(10);
+      stream.addTrack(destination.stream.getAudioTracks()[0]);
+      window.sparkTestStream = { context, tone, stream };
+      navigator.mediaDevices.getDisplayMedia = async () => stream;
+    });
+    await id(a.page, 'screen').click();
+    await id(a.page, 'pref-share-audio').check();
+    await a.page.locator('.source').first().click();
+    const streamAudio = b.page.locator(`#media-${alice}-screen-audio`);
+    await expect(streamAudio).toHaveCount(1);
+    await b.page.evaluate(async peer => {
+      const context = new AudioContext(); await context.resume();
+      const stream = document.getElementById(`media-${peer}-screen-audio`).srcObject;
+      const analyser = context.createAnalyser(); analyser.fftSize = 2048;
+      context.createMediaStreamSource(stream).connect(analyser);
+      window.sparkTestReceived = { context, analyser };
+    }, alice);
+    await expect.poll(() => b.page.evaluate(() => {
+      const samples = new Float32Array(2048);
+      window.sparkTestReceived.analyser.getFloatTimeDomainData(samples);
+      return Math.sqrt(samples.reduce((sum, n) => sum+n*n, 0)/samples.length);
+    })).toBeGreaterThan(0.03);
+    await setPreference(b.page, `volume-${alice}-audio`, 25);
+    await setPreference(b.page, `volume-${alice}-screen-audio`, 70);
+    const volumes = () => b.page.evaluate(peer => ['audio', 'screen-audio'].map(kind => document.getElementById(`media-${peer}-${kind}`)?.volume), alice);
+    expect(await volumes()).toEqual([0.25, 0.7]);
+    await id(a.page, 'mute').click();
+    await expect(b.page.locator(`.peer-mixer[data-speaker="${alice}"]`)).not.toHaveClass(/speaking/);
+    // Stream continues to carry PCM while the person's microphone is muted.
+    await expect.poll(() => b.page.evaluate(() => {
+      const samples = new Float32Array(2048); window.sparkTestReceived.analyser.getFloatTimeDomainData(samples);
+      return Math.max(...samples.map(Math.abs));
+    })).toBeGreaterThan(0.05);
+    await setPreference(b.page, `volume-${alice}-screen-audio`, 0);
+    expect(await volumes()).toEqual([0.25, 0]);
+    await setPreference(b.page, `volume-${alice}-screen-audio`, 70);
+    await id(b.page, 'deafen').click();
+    expect(await streamAudio.evaluate(el => el.srcObject.getAudioTracks()[0].enabled)).toBe(false);
+    await id(b.page, 'deafen').click();
+    expect(await volumes()).toEqual([0.25, 0.7]);
+    expect(await streamAudio.evaluate(el => el.srcObject.getAudioTracks()[0].enabled)).toBe(true);
+    await b.page.screenshot({ path: info.outputPath('independent-audio-controls.png') });
+    await id(a.page, 'screen').click();
+    await expect(streamAudio).toHaveCount(0);
+    expect(await a.page.evaluate(() => window.sparkTestStream.stream.getTracks().every(t => t.readyState === 'ended'))).toBe(true);
+    await id(b.page, 'leave-voice').click();
+    await assertPlayedCue(a.page, 'peer-leave');
+    await id(b.page, 'channel-lounge').click();
+    await expect.poll(() => b.page.locator(`#media-${alice}-audio`).evaluate(el => el.volume)).toBe(0.25);
+    await expect(id(b.page, `volume-${alice}-screen-audio`)).toHaveValue('70');
+    expect((await b.page.evaluate(() => window.sparkDesktop.getSettings())).peer_volumes[alice]).toEqual([25, 70]);
+    await id(a.page, 'leave-voice').click();
+    await id(b.page, 'leave-voice').click();
+    expect(await a.page.locator('.speaking').count()).toBe(0);
+    expect(await a.page.evaluate(() => window.sparkTestMicrophones.every(t => t.readyState === 'ended'))).toBe(true);
+    expect(await b.page.locator('.speaking').count()).toBe(0);
+    await a.page.evaluate(() => { window.sparkTestStream.tone.stop(); return window.sparkTestStream.context.close(); });
+    await b.page.evaluate(() => window.sparkTestReceived.context.close());
+    expect(errors).toEqual([]);
+  } finally {
+    for (const client of clients.reverse()) await client.app.close().catch(() => {});
+    await fs.writeFile(info.outputPath('renderer-errors.json'), JSON.stringify(errors, null, 2));
+    await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('isolated system loopback: actual Linux desktop audio from a private null sink', async ({}, info) => {
+  test.skip(process.platform !== 'linux' || process.env.SPARK_ISOLATED_AUDIO !== '1', 'Use scripts/test-loopback-linux.mjs');
+  expect(process.env.PULSE_SERVER).toMatch(/^unix:\/tmp\/spark-loopback-[^/]+\/runtime\/pulse\/native$/);
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'spark-loopback-client-'));
+  let app, player;
+  try {
+    app = await electron.launch({ args: [root, '--ozone-platform=x11'], env: { ...process.env,
+      SPARK_DATA_DIR: temporary, SPARK_E2E_MEDIA: '0' }, timeout: 45_000 });
+    const page = await app.firstWindow();
+    await expect(id(page, 'display-name')).toBeVisible();
+    await page.evaluate(async () => window.sparkDesktop.setSettings({ ...await window.sparkDesktop.getSettings(), share_audio: true }));
+    // Explicitly approve only this isolated test window via the real source IPC.
+    await app.evaluate(async ({ BrowserWindow }) => {
+      global.sparkCaptureTest = new BrowserWindow({ width: 400, height: 300, title: 'Spark Loopback Test' });
+      await global.sparkCaptureTest.loadURL('data:text/html,<title>Spark Loopback Test</title><h1>Synthetic audio test</h1>');
+    });
+    await expect.poll(() => page.evaluate(async () => (await window.sparkDesktop.sources()).some(s => s.name === 'Spark Loopback Test'))).toBe(true);
+    // PCM played by a separate process: Chromium must capture the real null sink.
+    const pcm = Buffer.alloc(48000 * 2 * 2 * 30);
+    for (let i = 0; i < pcm.length / 4; i++) {
+      const value = Math.round(Math.sin(i * 2 * Math.PI * 523 / 48000) * 8000);
+      pcm.writeInt16LE(value, i * 4); pcm.writeInt16LE(value, i * 4 + 2);
+    }
+    const audioFile = path.join(temporary, 'tone.raw'); await fs.writeFile(audioFile, pcm);
+    player = require('node:child_process').spawn('paplay', ['--raw', '--rate=48000', '--channels=2', '--format=s16le', audioFile], { env: process.env });
+    const result = await page.evaluate(async () => {
+      const source = (await window.sparkDesktop.sources()).find(s => s.name === 'Spark Loopback Test');
+      await window.sparkDesktop.selectSource(source.id);
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: { restrictOwnAudio: true, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      const context = new AudioContext(); await context.resume();
+      const analyser = context.createAnalyser(); analyser.fftSize = 2048;
+      context.createMediaStreamSource(stream).connect(analyser);
+      window.sparkLoopback = { stream, context, analyser };
+      return stream.getTracks().map(t => ({ kind: t.kind, state: t.readyState, settings: t.getSettings() }));
+    });
+    await fs.writeFile(info.outputPath('linux-loopback-tracks.json'), JSON.stringify(result, null, 2));
+    expect(result.filter(t => t.kind === 'audio' && t.state === 'live')).toHaveLength(1);
+    await expect.poll(() => page.evaluate(() => {
+      const data = new Float32Array(2048); window.sparkLoopback.analyser.getFloatTimeDomainData(data);
+      return Math.sqrt(data.reduce((sum, v) => sum+v*v, 0)/data.length);
+    })).toBeGreaterThan(0.02);
+    await fs.writeFile(info.outputPath('linux-loopback-tracks.json'), JSON.stringify(result, null, 2));
+    player.kill();
+    await page.evaluate(() => {
+      const tone = window.sparkLoopback.context.createOscillator();
+      const gain = window.sparkLoopback.context.createGain(); gain.gain.value = 0.2;
+      tone.connect(gain).connect(window.sparkLoopback.context.destination); tone.start();
+      window.sparkLoopback.ownTone = tone;
+    });
+    // Linux Chromium currently captures Spark playback too. Record and verify
+    // that limitation: sharing is opt-in and the source picker explains it.
+    const ownRms = () => page.evaluate(() => {
+      const data = new Float32Array(2048); window.sparkLoopback.analyser.getFloatTimeDomainData(data);
+      return Math.sqrt(data.reduce((sum, v) => sum+v*v, 0)/data.length);
+    });
+    const restrictsOwnAudio = result.find(t => t.kind === 'audio').settings.restrictOwnAudio === true;
+    if (restrictsOwnAudio) await expect.poll(ownRms).toBeLessThan(0.005);
+    else await expect.poll(ownRms).toBeGreaterThan(0.03);
+    await fs.writeFile(info.outputPath('linux-loopback-own-audio.json'), JSON.stringify({ restrictsOwnAudio, rms: await ownRms() }));
+    await page.evaluate(() => window.sparkLoopback.ownTone.stop());
+
+    await page.evaluate(async () => { window.sparkLoopback.stream.getTracks().forEach(t => t.stop()); await window.sparkLoopback.context.close(); });
+  } finally {
+    player?.kill();
+    await app?.close().catch(() => {});
     await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

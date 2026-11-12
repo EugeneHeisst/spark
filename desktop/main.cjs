@@ -16,7 +16,7 @@ if (testing) {
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
   app.commandLine.appendSwitch('mute-audio');
 }
-app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
+app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer,PulseaudioLoopbackForScreenShare');
 
 let child;
 let mainWindow;
@@ -51,7 +51,7 @@ async function prepareUpdateRestart() {
     });
   } catch (error) { quitting = false; throw error; }
 }
-const defaults = { theme: 'dark', accent: '#ffb251', zoom: 100, sounds: true, volume: 55, close_to_tray: true, compact: false, auto_updates: true };
+const defaults = { theme: 'dark', accent: '#ffb251', zoom: 100, sounds: true, volume: 55, noise_suppression: true, share_audio: false, peer_volumes: {}, close_to_tray: true, compact: false, auto_updates: true };
 function normalizePreferences(input) {
   const p = input || {};
   return { theme: ['dark', 'light', 'midnight'].includes(p.theme) ? p.theme : defaults.theme,
@@ -59,6 +59,11 @@ function normalizePreferences(input) {
     zoom: Number.isInteger(p.zoom) ? Math.min(150, Math.max(75, p.zoom)) : defaults.zoom,
     sounds: typeof p.sounds === 'boolean' ? p.sounds : defaults.sounds,
     volume: Number.isInteger(p.volume) ? Math.min(100, Math.max(0, p.volume)) : defaults.volume,
+    noise_suppression: typeof p.noise_suppression === 'boolean' ? p.noise_suppression : true,
+    share_audio: typeof p.share_audio === 'boolean' ? p.share_audio : false,
+    peer_volumes: Object.fromEntries(Object.entries(p.peer_volumes && typeof p.peer_volumes === 'object' ? p.peer_volumes : {})
+      .filter(([id, levels]) => /^[a-zA-Z0-9-]{1,80}$/.test(id) && Array.isArray(levels) && levels.length === 2 && levels.every(Number.isInteger))
+      .slice(-500).map(([id, levels]) => [id, levels.map(v => Math.min(100, Math.max(0, v)))])),
     close_to_tray: typeof p.close_to_tray === 'boolean' ? p.close_to_tray : defaults.close_to_tray,
     compact: typeof p.compact === 'boolean' ? p.compact : defaults.compact,
     auto_updates: typeof p.auto_updates === 'boolean' ? p.auto_updates : defaults.auto_updates };
@@ -172,7 +177,10 @@ function installPermissions() {
     const entry = approvedSources.get(frame.processId + ':' + frame.routingId);
     approvedSources.delete(frame.processId + ':' + frame.routingId);
     if (!entry || Date.now() - entry.at > 60_000) return callback(null);
-    callback({ video: entry.source });
+    // Never capture host audio in synthetic tests; stream-audio tests supply
+    // generated PCM at the renderer boundary or an isolated audio server.
+    callback({ video: entry.source, ...(request.audioRequested && preferences.share_audio && !testing
+      && ['win32', 'linux'].includes(process.platform) ? { audio: 'loopback' } : {}) });
   });
 }
 

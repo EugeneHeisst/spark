@@ -1,7 +1,7 @@
 //! Browser media lives in Rust. Chromium supplies device capture and the WebRTC
 //! implementation; signaling always travels through the authenticated LAN host.
 //!
-//! Every connection reserves audio, camera and screen transceivers in that order.
+//! Every connection reserves audio, camera, screen and screen-audio transceivers in that order.
 //! Only the lexicographically smaller peer creates offers. Replacing a reserved
 //! sender's track never creates offer glare, and early ICE is queued until SDP.
 use std::{
@@ -38,6 +38,7 @@ pub struct MediaCallbacks {
     pub on_stream: Rc<dyn Fn(String, String, Option<MediaStream>)>,
     pub on_error: Rc<dyn Fn(String)>,
     pub on_connection: Rc<dyn Fn(String, String)>,
+    pub on_speaking: Rc<dyn Fn(String, bool)>,
 }
 
 #[derive(Clone)]
@@ -59,11 +60,15 @@ struct Inner {
     epoch: Cell<u64>,
     camera_busy: Cell<bool>,
     screen_busy: Cell<bool>,
+    noise_suppression: Cell<bool>,
+    noise_busy: Cell<bool>,
+    share_audio: Cell<bool>,
+    activity: super::voice_activity::VoiceActivity,
 }
 
 struct Connection {
     pc: RtcPeerConnection,
-    senders: RefCell<[Option<RtcRtpSender>; 3]>,
+    senders: RefCell<[Option<RtcRtpSender>; 4]>,
     streams: RefCell<HashMap<String, MediaStream>>,
     remote_description: Cell<bool>,
     remote_ufrag: RefCell<Option<String>>,
@@ -88,6 +93,7 @@ impl MediaManager {
     pub fn new(self_id: String, callbacks: MediaCallbacks) -> Self {
         let this = Self {
             inner: Rc::new(Inner {
+                activity: super::voice_activity::VoiceActivity::new(callbacks.on_speaking.clone()),
                 self_id,
                 callbacks,
                 state: RefCell::new(MediaState::default()),
@@ -101,6 +107,9 @@ impl MediaManager {
                 epoch: Cell::new(0),
                 camera_busy: Cell::new(false),
                 screen_busy: Cell::new(false),
+                noise_suppression: Cell::new(true),
+                noise_busy: Cell::new(false),
+                share_audio: Cell::new(false),
             }),
         };
         this.install_debug();
@@ -127,6 +136,9 @@ impl MediaManager {
             stop_stream(&stream);
             return Err("Вызов уже завершён".into());
         }
+        if let Err(e) = self.inner.activity.add("local", &stream) {
+            self.report(format!("Индикатор речи: {}", js_error(e)));
+        }
         *self.inner.microphone.borrow_mut() = Some(stream);
         self.apply_audio_enabled();
         // An offer may have arrived while the device permission prompt was open.
@@ -144,6 +156,7 @@ impl MediaManager {
             self.remove_peer(&id);
         }
         self.inner.known.borrow_mut().clear();
+        self.inner.activity.clear();
         for slot in [
             &self.inner.microphone,
             &self.inner.camera,
@@ -164,6 +177,57 @@ impl MediaManager {
         self.emit_state();
     }
 
+    pub fn configure_audio(&self, noise: bool, share: bool) {
+        self.inner.noise_suppression.set(noise);
+        self.inner.share_audio.set(share);
+    }
+
+    pub async fn set_noise_suppression(&self, enabled: bool) -> Result<(), String> {
+        if self.inner.noise_busy.replace(true) {
+            return Err("Шумоподавление уже переключается".into());
+        }
+        let previous = self.inner.noise_suppression.replace(enabled);
+        let epoch = self.inner.epoch.get();
+        let old = self.inner.microphone.borrow().clone();
+        let result = async {
+            let Some(old) = old else {
+                return Ok(());
+            };
+            // Chromium can resolve applyConstraints without changing its audio
+            // processor. Acquire the requested processor and swap the sender.
+            let stream = self.capture(false).await?;
+            if self.inner.epoch.get() != epoch {
+                stop_stream(&stream);
+                return Err("Вызов уже завершён".into());
+            }
+            let track = first_track(&stream, "audio").ok_or("Микрофон не предоставил звук")?;
+            let state = self.inner.state.borrow().clone();
+            track.set_enabled(!state.muted && !state.deafened);
+            if let Err(e) = self.replace_for_all(0, Some(track)).await {
+                let _ = self.replace_for_all(0, first_track(&old, "audio")).await;
+                stop_stream(&stream);
+                return Err(e);
+            }
+            if self.inner.epoch.get() != epoch {
+                stop_stream(&stream);
+                return Err("Вызов уже завершён".into());
+            }
+            if let Err(e) = self.inner.activity.add("local", &stream) {
+                self.report(format!("Индикатор речи: {}", js_error(e)));
+            }
+            *self.inner.microphone.borrow_mut() = Some(stream);
+            self.apply_audio_enabled();
+            stop_stream(&old);
+            Ok(())
+        }
+        .await;
+        self.inner.noise_busy.set(false);
+        self.inner
+            .noise_suppression
+            .set(if result.is_ok() { enabled } else { previous });
+        result
+    }
+
     pub fn set_muted(&self, muted: bool) {
         self.inner.state.borrow_mut().muted = muted;
         self.apply_audio_enabled();
@@ -174,9 +238,11 @@ impl MediaManager {
         self.inner.state.borrow_mut().deafened = deafened;
         self.apply_audio_enabled();
         for (_, connection) in self.connections() {
-            if let Some(stream) = connection.streams.borrow().get("audio") {
+            for stream in connection.streams.borrow().values() {
                 for track in tracks(stream) {
-                    track.set_enabled(!deafened);
+                    if track.kind() == "audio" {
+                        track.set_enabled(!deafened);
+                    }
                 }
             }
         }
@@ -245,7 +311,16 @@ impl MediaManager {
         // In an ordinary browser this is the browser's own permission/source picker.
         let constraints = DisplayMediaStreamConstraints::new();
         constraints.set_video(&JsValue::TRUE);
-        constraints.set_audio(&JsValue::FALSE);
+        let audio = Object::new();
+        let _ = Reflect::set(&audio, &"restrictOwnAudio".into(), &JsValue::TRUE);
+        for key in ["echoCancellation", "noiseSuppression", "autoGainControl"] {
+            let _ = Reflect::set(&audio, &key.into(), &JsValue::FALSE);
+        }
+        if self.inner.share_audio.get() {
+            constraints.set_audio(audio.as_ref());
+        } else {
+            constraints.set_audio(&JsValue::FALSE);
+        }
         let promise = devices()?
             .get_display_media_with_constraints(&constraints)
             .map_err(|e| format!("Не удалось запросить экран: {}", js_error(e)))?;
@@ -268,6 +343,17 @@ impl MediaManager {
         if self.inner.epoch.get() != epoch || self.inner.screen.borrow().is_none() {
             stop_stream(&stream);
             return Err("Демонстрация уже остановлена".into());
+        }
+        if let Err(error) = self.replace_for_all(3, first_track(&stream, "audio")).await {
+            let _ = self.stop_screen().await;
+            return Err(error);
+        }
+        if self.inner.epoch.get() != epoch {
+            stop_stream(&stream);
+            return Err("Вызов уже завершён".into());
+        }
+        if self.inner.share_audio.get() && first_track(&stream, "audio").is_none() {
+            self.report("Источник не предоставил звук. Экран передаётся без звука.".into());
         }
         self.inner.state.borrow_mut().screen = true;
         (self.inner.callbacks.on_stream)("local".into(), "screen".into(), Some(stream));
@@ -303,6 +389,7 @@ impl MediaManager {
             }
             self.publish_remote(&id, "camera", peer.camera);
             self.publish_remote(&id, "screen", peer.screen);
+            self.publish_remote(&id, "screen-audio", peer.screen);
         }
     }
 
@@ -339,7 +426,15 @@ impl MediaManager {
         } else {
             let audio = Object::new();
             for key in ["echoCancellation", "noiseSuppression", "autoGainControl"] {
-                let _ = Reflect::set(&audio, &key.into(), &JsValue::TRUE);
+                let enabled = key != "noiseSuppression" || self.inner.noise_suppression.get();
+                let constraint = if key == "noiseSuppression" {
+                    let exact = Object::new();
+                    let _ = Reflect::set(&exact, &"exact".into(), &JsValue::from_bool(enabled));
+                    JsValue::from(exact)
+                } else {
+                    JsValue::from_bool(enabled)
+                };
+                let _ = Reflect::set(&audio, &key.into(), &constraint);
             }
             constraints.set_audio(&audio);
             constraints.set_video(&JsValue::FALSE);
@@ -421,9 +516,13 @@ impl MediaManager {
                     pc.add_transceiver_with_str_and_init("video", &init)
                         .sender(),
                 ),
+                Some(
+                    pc.add_transceiver_with_str_and_init("audio", &init)
+                        .sender(),
+                ),
             ]
         } else {
-            [None, None, None]
+            [None, None, None, None]
         };
         let connection = Rc::new(Connection {
             pc: pc.clone(),
@@ -498,7 +597,9 @@ impl MediaManager {
                 return;
             };
             let track = event.track();
-            let kind = if track.kind() == "audio" {
+            let kind = if event.transceiver().mid().as_deref() == Some("3") {
+                "screen-audio"
+            } else if track.kind() == "audio" {
                 "audio"
             } else if event.transceiver().mid().as_deref() == Some("2") {
                 "screen"
@@ -509,13 +610,18 @@ impl MediaManager {
                 return;
             };
             stream.add_track(&track);
-            if kind == "audio" {
+            if kind == "audio" || kind == "screen-audio" {
                 track.set_enabled(!inner.state.borrow().deafened);
+            }
+            if kind == "audio" {
+                if let Err(e) = inner.activity.add(&peer_id, &stream) {
+                    (inner.callbacks.on_error)(format!("Индикатор речи: {}", js_error(e)));
+                }
             }
             connection.streams.borrow_mut().insert(kind.into(), stream);
             let active = kind == "audio"
                 || inner.known.borrow().get(&peer_id).is_some_and(|peer| {
-                    if kind == "screen" {
+                    if kind == "screen" || kind == "screen-audio" {
                         peer.screen
                     } else {
                         peer.camera
@@ -758,7 +864,7 @@ impl MediaManager {
                             .iter()
                             .filter_map(|value| value.dyn_into().ok())
                             .collect();
-                        if transceivers.len() != 3 {
+                        if !(3..=4).contains(&transceivers.len()) {
                             return Err("Несовместимая схема медиадорожек".into());
                         }
                         for (index, transceiver) in transceivers.into_iter().enumerate() {
@@ -827,14 +933,22 @@ impl MediaManager {
             self.inner.microphone.borrow().clone(),
             self.inner.camera.borrow().clone(),
             self.inner.screen.borrow().clone(),
+            self.inner.screen.borrow().clone(),
         ];
         for (index, stream) in streams.into_iter().enumerate() {
             let Some(sender) = connection.senders.borrow()[index].clone() else {
                 continue;
             };
-            let track = stream
-                .as_ref()
-                .and_then(|stream| first_track(stream, if index == 0 { "audio" } else { "video" }));
+            let track = stream.as_ref().and_then(|stream| {
+                first_track(
+                    stream,
+                    if index == 0 || index == 3 {
+                        "audio"
+                    } else {
+                        "video"
+                    },
+                )
+            });
             JsFuture::from(sender.replace_track(track.as_ref()))
                 .await
                 .map_err(js_error)?;
@@ -857,6 +971,7 @@ impl MediaManager {
     }
 
     fn remove_peer(&self, id: &str) {
+        self.inner.activity.remove(id);
         let connection = self.inner.peers.borrow_mut().remove(id);
         if let Some(connection) = connection {
             connection.pc.set_onicecandidate(None);
@@ -870,7 +985,7 @@ impl MediaManager {
             for stream in connection.streams.borrow().values() {
                 stop_stream(stream);
             }
-            for kind in ["audio", "camera", "screen"] {
+            for kind in ["audio", "camera", "screen", "screen-audio"] {
                 (self.inner.callbacks.on_stream)(id.into(), kind.into(), None);
             }
             (self.inner.callbacks.on_connection)(id.into(), "closed".into());
@@ -954,7 +1069,11 @@ impl MediaManager {
         }
         (self.inner.callbacks.on_stream)("local".into(), kind.into(), None);
         self.emit_state();
-        self.replace_for_all(index, None).await
+        self.replace_for_all(index, None).await?;
+        if screen {
+            self.replace_for_all(3, None).await?;
+        }
+        Ok(())
     }
 
     fn install_debug(&self) {
@@ -1030,14 +1149,23 @@ impl MediaManager {
                 .map(|stream| {
                     tracks(stream)
                         .into_iter()
-                        .map(move |track| track_snapshot(kind, &track))
+                        .map(move |track| {
+                            track_snapshot(
+                                if kind == "screen" && track.kind() == "audio" {
+                                    "screen-audio"
+                                } else {
+                                    kind
+                                },
+                                &track,
+                            )
+                        })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default()
         })
         .collect();
         let peers: Vec<_> = self.connections().into_iter().map(|(id, connection)| {
-            let senders: Vec<_> = connection.senders.borrow().iter().enumerate().map(|(index, sender)| sender.as_ref().and_then(RtcRtpSender::track).map(|track| track_snapshot(["audio", "camera", "screen"][index], &track)).unwrap_or_else(|| json!({"kind":(["audio","camera","screen"][index]),"track":null}))).collect();
+            let senders: Vec<_> = connection.senders.borrow().iter().enumerate().map(|(index, sender)| sender.as_ref().and_then(RtcRtpSender::track).map(|track| track_snapshot(["audio", "camera", "screen", "screen-audio"][index], &track)).unwrap_or_else(|| json!({"kind":(["audio","camera","screen","screen-audio"][index]),"track":null}))).collect();
             json!({"id":id,"connectionState":property_string(connection.pc.as_ref(), "connectionState"),
                 "signalingState":property_string(connection.pc.as_ref(), "signalingState"),
                 "iceConnectionState":property_string(connection.pc.as_ref(), "iceConnectionState"),
@@ -1098,7 +1226,7 @@ fn property_string(value: &JsValue, key: &str) -> String {
         .unwrap_or_default()
 }
 fn track_snapshot(kind: &str, track: &MediaStreamTrack) -> Value {
-    json!({"kind":kind,"id":track.id(),"enabled":track.enabled(),"readyState":property_string(track.as_ref(), "readyState"),"muted":track.muted()})
+    json!({"kind":kind,"id":track.id(),"enabled":track.enabled(),"readyState":property_string(track.as_ref(), "readyState"),"muted":track.muted(),"settings":serde_json::from_str::<Value>(&js_sys::JSON::stringify(&track.get_settings()).ok().and_then(|v|v.as_string()).unwrap_or_default()).unwrap_or(Value::Null)})
 }
 async fn add_candidate(pc: &RtcPeerConnection, payload: &Value) -> Result<(), String> {
     let candidate = payload["candidate"]

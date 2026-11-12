@@ -7,6 +7,8 @@ import wave
 RATE = 24000
 # Each cue has its own melody/rhythm, with soft attack and release.
 CUES = {
+    'peer-join': [(659, .06), (988, .12)],
+    'peer-leave': [(659, .07), (392, .13)],
     'connect': [(440, .09), (660, .09), (880, .16)],
     'disconnect': [(660, .09), (440, .10), (294, .16)],
     'notification': [(784, .08), (1047, .16)],

@@ -9,6 +9,10 @@ Rust service + Rust/WASM UI (Leptos 0.8 CSR, web-sys media), thin Electron shell
 - `spark-ui`: Leptos Rust/WASM UI; `media.rs` implements WebRTC and media lifecycle.
 - Electron shell: desktop integration, builds and packaging; end-to-end tests verify cross-client interactions.
 
+## Media extension (0.4.0)
+
+Connections reserve microphone audio, camera video, screen video, then screen audio (MIDs 0/1/2/3). Screen sound has its own receiver and local per-peer volume; microphone mute does not mute screen sound. Deafen disables both received audio tracks. Update all participants to 0.4.0 for this schema. Speech activity is local analysis of microphone PCM only, never a network presence field.
+
 ## Frozen JSON contract
 
 All enums use `#[serde(tag="kind", rename_all="snake_case")]`. IDs are strings; timestamps Unix milliseconds i64.

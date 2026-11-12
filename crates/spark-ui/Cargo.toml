@@ -17,7 +17,7 @@ serde_json.workspace = true
 spark-protocol.workspace = true
 console_error_panic_hook = "0.1"
 web-sys = { version = "0.3", features = [
-  "Window", "Document", "Element", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement",
+  "AudioContext", "AudioNode", "AnalyserNode", "MediaStreamAudioSourceNode", "MediaTrackConstraints", "MediaTrackSettings", "MediaStreamTrackState", "Window", "Document", "Element", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement",
   "HtmlAudioElement", "HtmlSelectElement", "HtmlMediaElement", "HtmlVideoElement", "Node", "NodeList", "Event", "EventTarget",
   "KeyboardEvent", "MessageEvent", "CloseEvent", "ErrorEvent", "MouseEvent", "Location",
   "Request", "RequestInit", "RequestMode", "Response", "Headers", "WebSocket", "BinaryType",

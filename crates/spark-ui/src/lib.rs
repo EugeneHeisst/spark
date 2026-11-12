@@ -2,6 +2,7 @@
 mod media;
 mod preferences;
 mod updates;
+mod voice_activity;
 
 use js_sys::{Function, Promise, Reflect};
 use leptos::prelude::*;
@@ -79,6 +80,7 @@ struct App {
     sources: Vec<Source>,
     media: Option<MediaManager>,
     media_state: MediaState,
+    speaking: std::collections::HashSet<String>,
     voice_generation: u32,
     streams: HashMap<(String, String), MediaStream>,
     connections: HashMap<String, String>,
@@ -337,7 +339,7 @@ fn render_sidebar(app: &AppRef) {
                     .iter()
                     .filter(|p| p.voice_channel.as_deref() == Some(c.id.as_str()))
                 {
-                    channels.push_str(&format!("<div class='voice-member'><span class='avatar tiny'>{}</span><span>{}</span><span>{}</span></div>",initial(&p.name),esc(&p.name),if p.muted {"♩̸"} else {""}));
+                    channels.push_str(&format!("<div class='voice-member' data-speaker='{}'><span class='avatar tiny'>{}</span><span>{}</span><span>{}</span></div>",esc(&p.id),initial(&p.name),esc(&p.name),if p.muted {"♩̸"} else {""}));
                 }
             }
         }
@@ -510,6 +512,45 @@ fn connection_label(state: &str) -> &str {
         _ => "Подключаем…",
     }
 }
+fn render_speaking(app: &AppRef) {
+    let s = app.borrow();
+    if let Ok(nodes) = document().query_selector_all("[data-speaker]") {
+        for i in 0..nodes.length() {
+            if let Some(el) = nodes
+                .item(i)
+                .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+            {
+                let peer = el.get_attribute("data-speaker").unwrap_or_default();
+                let local = peer == "local" || s.profile.as_ref().is_some_and(|p| p.id == peer);
+                let speaking = s.speaking.contains(if local { "local" } else { &peer });
+                let _ = el.class_list().toggle_with_force("speaking", speaking);
+            }
+        }
+    }
+}
+
+fn render_mixer(app: &AppRef) {
+    let s = app.borrow();
+    let mut out = String::new();
+    for peer in s.peers.iter().filter(|p| {
+        p.voice_channel == s.media_state.channel_id
+            && !s.profile.as_ref().is_some_and(|me| me.id == p.id)
+    }) {
+        out.push_str(&format!(
+            "<div class='peer-mixer' data-speaker='{}'><strong>{}</strong>",
+            esc(&peer.id),
+            esc(&peer.name)
+        ));
+        for (kind, label) in [("audio", "Голос"), ("screen-audio", "Стрим")] {
+            let volume = s.preferences.peer_volume(&peer.id, kind);
+            out.push_str(&format!("<label>{label}<input type='range' min='0' max='100' step='1' value='{volume}' aria-label='{label}: {}' data-volume-peer='{}' data-volume-kind='{kind}' data-testid='volume-{}-{kind}'/><output id='volume-{}-{kind}'>{volume}%</output></label>", esc(&peer.name), esc(&peer.id), esc(&peer.id), esc(&peer.id)));
+        }
+        out.push_str("</div>");
+    }
+    drop(s);
+    html("call-mixer", &out);
+}
+
 fn render_voice(app: &AppRef) {
     let (media_state, channels, peers, streams, connections, profile) = {
         let s = app.borrow();
@@ -529,7 +570,7 @@ fn render_voice(app: &AppRef) {
     if element("call-grid").is_none() {
         html(
             "voice-panel",
-            "<div id='call-heading' class='voice-heading'></div><div id='call-grid' class='video-grid'></div><div id='call-audio'></div><div id='call-controls' class='call-controls'></div>",
+            "<div id='call-heading' class='voice-heading'></div><div id='call-grid' class='video-grid'></div><div id='call-audio'></div><div id='call-mixer' class='call-mixer'></div><div id='call-controls' class='call-controls'></div>",
         );
     }
     let name = channels
@@ -565,6 +606,7 @@ fn render_voice(app: &AppRef) {
             if media_state.screen { "on" } else { "" }
         ),
     );
+    render_mixer(app);
     // Media elements survive state/presence updates. Reassigning srcObject restarts
     // playback in Chromium, so reconcile by peer/kind and replace only changed streams.
     if let Ok(nodes) = document().query_selector_all("[data-stream-key]") {
@@ -581,7 +623,9 @@ fn render_voice(app: &AppRef) {
             }
         }
     }
-    let videos = streams.keys().any(|(_, kind)| kind != "audio");
+    let videos = streams
+        .keys()
+        .any(|(_, kind)| matches!(kind.as_str(), "camera" | "screen"));
     if videos {
         if let Some(el) = element("audio-avatars") {
             el.remove();
@@ -606,25 +650,31 @@ fn render_voice(app: &AppRef) {
                     "new"
                 },
             );
-            avatars.push_str(&format!("<div class='audio-person'><span class='avatar large {}'>{}</span><strong>{}</strong><small data-testid='connection-{}'>{}</small></div>",if p.muted {"muted"}else{""},initial(&p.name),esc(&p.name),esc(&p.id),connection_label(state)));
+            avatars.push_str(&format!("<div class='audio-person' data-speaker='{}'><span class='avatar large {}'>{}</span><strong>{}</strong><small data-testid='connection-{}'>{}</small></div>",esc(&p.id),if p.muted {"muted"}else{""},initial(&p.name),esc(&p.name),esc(&p.id),connection_label(state)));
         }
         html("audio-avatars", &avatars);
     }
     for ((peer, kind), stream) in &streams {
-        if kind == "audio" && peer == "local" {
+        if (kind == "audio" || kind == "screen-audio") && peer == "local" {
             continue;
         }
         let id = format!("media-{peer}-{kind}");
         if element(&id).is_none() {
-            let Ok(tile) = document().create_element(if kind == "audio" { "audio" } else { "div" })
+            let Ok(tile) =
+                document().create_element(if kind == "audio" || kind == "screen-audio" {
+                    "audio"
+                } else {
+                    "div"
+                })
             else {
                 continue;
             };
             tile.set_attribute("data-stream-key", &format!("{peer}:{kind}"))
                 .ok();
             tile.set_attribute("data-peer", peer).ok();
+            tile.set_attribute("data-speaker", peer).ok();
             tile.set_attribute("data-kind", kind).ok();
-            if kind == "audio" {
+            if kind == "audio" || kind == "screen-audio" {
                 tile.set_id(&id);
                 tile.set_attribute("autoplay", "").ok();
                 if let Some(parent) = element("call-audio") {
@@ -664,8 +714,9 @@ fn render_voice(app: &AppRef) {
         }
         if let Some(el) = element(&id).and_then(|e| e.dyn_into::<web_sys::HtmlMediaElement>().ok())
         {
-            if peer == "local" {
-                el.set_muted(true);
+            el.set_muted(peer == "local" || kind == "camera" || kind == "screen");
+            if kind == "audio" || kind == "screen-audio" {
+                el.set_volume(f64::from(app.borrow().preferences.peer_volume(peer, kind)) / 100.);
             }
             if el.src_object().as_ref().map(|current| current.id()) != Some(stream.id()) {
                 el.set_src_object(Some(stream));
@@ -693,6 +744,7 @@ fn render_voice(app: &AppRef) {
             }
         }
     }
+    render_speaking(app);
 }
 
 fn render_overlay(app: &AppRef) {
@@ -738,7 +790,7 @@ fn render_overlay(app: &AppRef) {
             }).unwrap_or_default(),
             "channel"=>format!("<span class='eyebrow'>ВАШЕ ПРОСТРАНСТВО</span><h2>Создать канал</h2><label class='field'>Название<input id='channel-name' data-field='channel-name' data-testid='channel-name' maxlength='64' value='{}' placeholder='Например: идеи'/></label><label class='field'>Тип канала<select data-field='channel-kind' data-testid='channel-kind'><option value='text' {}>Текстовый</option><option value='voice' {}>Голосовой</option></select></label><div class='modal-actions'><button data-action='close-modal'>Отмена</button><button class='primary' data-action='create-channel' data-testid='create-channel'>Создать</button></div>",esc(&s.form.channel_name),if s.form.channel_kind=="text" {"selected"} else {""},if s.form.channel_kind=="voice" {"selected"} else {""}),
             "settings"=>format!("<span class='eyebrow'>SPARK · {}</span><h2>Настройки</h2><label class='field'>Ваше имя<input data-field='settings-name' data-testid='settings-name' maxlength='64' value='{}'/></label>{}<div class='settings-info'><strong>Локальная комната</strong><p>{}</p><code>{}</code><small>{}</small></div><div class='modal-actions'>{}<button class='primary' data-action='save-settings' data-testid='save-settings'>Сохранить имя</button></div>",esc(&s.version),esc(&s.form.settings_name),format!("{}{}",preferences::controls(&s.preferences),update_controls),s.conn.as_ref().map(|c|esc(&c.server_name)).unwrap_or_else(||"Нет подключения".into()),s.conn.as_ref().map(|c|esc(&c.address)).unwrap_or_default(),if s.conn.as_ref().is_some_and(|c|c.hosting) {"Вы — создатель. При выходе комната остановится для всех."} else {"Настройки оформления действуют на этом компьютере."},if s.conn.is_some(){format!("<button class='danger-text' data-action='disconnect' data-testid='disconnect'>{}</button>",if s.conn.as_ref().is_some_and(|c|c.hosting){"Остановить комнату"}else{"Выйти из комнаты"})}else{String::new()}),
-            "sources"=>{let mut x="<span class='eyebrow'>ДЕМОНСТРАЦИЯ ЭКРАНА</span><h2>Что показать команде?</h2><p>Выберите экран или отдельное окно.</p><div class='sources'>".to_string();for src in &s.sources { x.push_str(&format!("<button class='source' data-action='select-source' data-id='{}' data-testid='source-{}'><img src='{}' alt=''/><strong>{}</strong></button>",esc(&src.id),esc(&src.id),esc(&src.thumbnail),esc(&src.name))); }x.push_str("</div><div class='modal-actions'><button data-action='close-modal'>Отмена</button></div>");x},
+            "sources"=>{let mut x=format!("<span class='eyebrow'>ДЕМОНСТРАЦИЯ ЭКРАНА</span><h2>Что показать команде?</h2><p>Выберите экран или отдельное окно.</p><label class='check-field'><input type='checkbox' data-field='pref-share-audio' data-testid='pref-share-audio' {} />Передавать системный звук</label><p>Передаётся звук всего компьютера. На Linux в него входят и голоса Spark: отключите звук звонка, чтобы собеседники не слышали себя.</p><div class='sources'>",if s.preferences.share_audio {"checked"} else {""});for src in &s.sources { x.push_str(&format!("<button class='source' data-action='select-source' data-id='{}' data-testid='source-{}'><img src='{}' alt=''/><strong>{}</strong></button>",esc(&src.id),esc(&src.id),esc(&src.thumbnail),esc(&src.name))); }x.push_str("</div><div class='modal-actions'><button data-action='close-modal'>Отмена</button></div>");x},
             _=>"<div class='brand-mark'>ϟ</div><h2>Spark</h2><p>Общение рядом. Чаты, голос, видео и файлы в вашей локальной сети.</p><div class='modal-actions'><button class='primary' data-action='close-modal'>Понятно</button></div>".into()
         };
         out.push_str(&format!("<div class='modal-shade'><section class='modal {}'><button class='modal-close' data-action='close-modal' data-testid='{}' title='Закрыть'>×</button>{content}</section></div>",if modal=="viewer"{"video-viewer"}else if modal=="settings"{"settings-modal"}else{""},if modal=="viewer"{"close-video"}else{"close-modal"}));
@@ -807,6 +859,21 @@ fn install_events(app: &AppRef) {
             .ok()
             .and_then(|v| v.as_string())
             .unwrap_or_default();
+        if let Some(kind) = target.get_attribute("data-volume-kind") {
+            let peer = target.get_attribute("data-volume-peer").unwrap_or_default();
+            let volume = value.parse::<u16>().unwrap_or(100).min(100);
+            a.borrow_mut()
+                .preferences
+                .set_peer_volume(&peer, &kind, volume);
+            if let Some(el) = element(&format!("media-{peer}-{kind}"))
+                .and_then(|el| el.dyn_into::<web_sys::HtmlMediaElement>().ok())
+            {
+                el.set_volume(f64::from(volume) / 100.);
+            }
+            html(&format!("volume-{peer}-{kind}"), &format!("{volume}%"));
+            preferences::persist(&a);
+            return;
+        }
         if let Some(field) = target.get_attribute("data-field") {
             if field.starts_with("pref-") {
                 let checked = target
@@ -1509,10 +1576,10 @@ fn server_event(app: &AppRef, event: ServerEvent) {
             ServerEvent::PeerJoined { peer }
                 if s.profile.as_ref().is_some_and(|p| p.id != peer.id) =>
             {
-                Some("connect")
+                Some("peer-join")
             }
             ServerEvent::PeerLeft { peer_id } if s.peers.iter().any(|p| &p.id == peer_id) => {
-                Some("disconnect")
+                Some("peer-leave")
             }
             ServerEvent::Presence { peer }
                 if s.profile.as_ref().is_some_and(|p| p.id != peer.id) =>
@@ -1525,9 +1592,9 @@ fn server_event(app: &AppRef, event: ServerEvent) {
                 let current = s.media_state.channel_id.as_ref();
                 if current.is_some() && old != peer.voice_channel.as_ref() {
                     if peer.voice_channel.as_ref() == current {
-                        Some("connect")
+                        Some("peer-join")
                     } else if old == current {
-                        Some("disconnect")
+                        Some("peer-leave")
                     } else {
                         None
                     }
@@ -1810,6 +1877,20 @@ fn install_media(app: &AppRef, self_id: String) {
             error(&a, message);
         }
     });
+    let weak = Rc::downgrade(app);
+    let on_speaking = Rc::new(move |peer: String, active: bool| {
+        if let Some(a) = weak.upgrade() {
+            {
+                let mut s = a.borrow_mut();
+                if active {
+                    s.speaking.insert(peer);
+                } else {
+                    s.speaking.remove(&peer);
+                }
+            }
+            render_speaking(&a);
+        }
+    });
     let manager = MediaManager::new(
         self_id,
         MediaCallbacks {
@@ -1818,8 +1899,11 @@ fn install_media(app: &AppRef, self_id: String) {
             on_stream,
             on_error,
             on_connection,
+            on_speaking,
         },
     );
+    let p = app.borrow().preferences.clone();
+    manager.configure_audio(p.noise_suppression, p.share_audio);
     app.borrow_mut().media = Some(manager);
 }
 fn join_voice(app: &AppRef, channel_id: String, video: bool) {

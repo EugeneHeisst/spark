@@ -79,7 +79,7 @@ function magic(bytes, expected, label) {
 }
 
 const wasmMagic = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
-const soundNames = ['connect', 'disconnect', 'notification', 'invite', 'mic-on', 'mic-off', 'sound-on', 'sound-off'];
+const soundNames = ['peer-join', 'peer-leave', 'connect', 'disconnect', 'notification', 'invite', 'mic-on', 'mic-off', 'sound-on', 'sound-off'];
 const sharedFiles = ['resources/app.asar', 'resources/ui/index.html', 'resources/ui/style.css',
   'resources/ui/pkg/spark_ui.js', 'resources/ui/pkg/spark_ui_bg.wasm',
   ...soundNames.map(name => `resources/ui/sounds/${name}.wav`)];

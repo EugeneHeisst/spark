@@ -9,6 +9,9 @@ pub struct Preferences {
     pub zoom: u16,
     pub sounds: bool,
     pub volume: u16,
+    pub noise_suppression: bool,
+    pub share_audio: bool,
+    pub peer_volumes: HashMap<String, [u16; 2]>,
     pub close_to_tray: bool,
     pub compact: bool,
     pub auto_updates: bool,
@@ -21,10 +24,24 @@ impl Default for Preferences {
             zoom: 100,
             sounds: true,
             volume: 55,
+            noise_suppression: true,
+            share_audio: false,
+            peer_volumes: HashMap::new(),
             close_to_tray: true,
             compact: false,
             auto_updates: true,
         }
+    }
+}
+
+impl Preferences {
+    pub fn peer_volume(&self, peer: &str, kind: &str) -> u16 {
+        self.peer_volumes.get(peer).unwrap_or(&[100, 100])[usize::from(kind == "screen-audio")]
+            .min(100)
+    }
+    pub fn set_peer_volume(&mut self, peer: &str, kind: &str, volume: u16) {
+        self.peer_volumes.entry(peer.into()).or_insert([100, 100])
+            [usize::from(kind == "screen-audio")] = volume.min(100);
     }
 }
 
@@ -113,7 +130,7 @@ pub fn controls(p: &Preferences) -> String {
         )
     };
     format!(
-        "<div class='settings-section'><h3>Персонализация</h3><div class='settings-grid'><label class='field'>Тема<select data-field='pref-theme' data-testid='pref-theme'>{}{}{}</select></label><label class='field'>Акцентный цвет<input type='color' data-field='pref-accent' data-testid='pref-accent' value='{}'/></label></div><label class='field'>Масштаб интерфейса <output id='zoom-label'>{}%</output><input type='range' min='75' max='150' step='5' value='{}' data-field='pref-zoom' data-testid='pref-zoom'/></label><button data-action='reset-zoom' class='subtle'>Сбросить масштаб · Ctrl+0</button><label class='check-field'><input type='checkbox' data-field='pref-compact' data-testid='pref-compact' {} />Компактные сообщения</label></div><div class='settings-section'><h3>Звуки событий</h3><label class='check-field'><input type='checkbox' data-field='pref-sounds' data-testid='pref-sounds' {} />Звуковые уведомления</label><label class='field'>Громкость <output id='volume-label'>{}%</output><input type='range' min='0' max='100' step='5' value='{}' data-field='pref-volume' data-testid='pref-volume'/></label><div class='sound-previews'>{}</div><small>Собственные звуки Spark. Настройки сохраняются сразу.</small></div><div class='settings-section'><h3>Окно приложения</h3><label class='check-field'><input type='checkbox' data-field='pref-tray' data-testid='pref-tray' {} />При закрытии сворачивать в трей</label><small>Звонки и демонстрация продолжаются, пока Spark находится в трее.</small><button data-action='quit' data-testid='quit-app' class='danger-text'>Выйти из Spark</button></div>",
+        "<div class='settings-section'><h3>Персонализация</h3><div class='settings-grid'><label class='field'>Тема<select data-field='pref-theme' data-testid='pref-theme'>{}{}{}</select></label><label class='field'>Акцентный цвет<input type='color' data-field='pref-accent' data-testid='pref-accent' value='{}'/></label></div><label class='field'>Масштаб интерфейса <output id='zoom-label'>{}%</output><input type='range' min='75' max='150' step='5' value='{}' data-field='pref-zoom' data-testid='pref-zoom'/></label><button data-action='reset-zoom' class='subtle'>Сбросить масштаб · Ctrl+0</button><label class='check-field'><input type='checkbox' data-field='pref-compact' data-testid='pref-compact' {} />Компактные сообщения</label></div><div class='settings-section'><h3>Голос и трансляция</h3><label class='check-field'><input type='checkbox' data-field='pref-noise' data-testid='pref-noise' {} />Шумоподавление микрофона</label><small>Убирает постоянный фоновый шум. Эхоподавление остаётся включённым.</small><label class='check-field'><input type='checkbox' data-field='pref-share-audio' data-testid='pref-share-audio' {} />Передавать системный звук со стримом</label><small>Для следующей демонстрации. Передаётся звук всего компьютера. На Linux в него входят и голоса Spark: отключите звук звонка, чтобы собеседники не слышали себя.</small></div><div class='settings-section'><h3>Звуки событий</h3><label class='check-field'><input type='checkbox' data-field='pref-sounds' data-testid='pref-sounds' {} />Звуковые уведомления</label><label class='field'>Громкость <output id='volume-label'>{}%</output><input type='range' min='0' max='100' step='5' value='{}' data-field='pref-volume' data-testid='pref-volume'/></label><div class='sound-previews'>{}</div><small>Собственные звуки Spark. Настройки сохраняются сразу.</small></div><div class='settings-section'><h3>Окно приложения</h3><label class='check-field'><input type='checkbox' data-field='pref-tray' data-testid='pref-tray' {} />При закрытии сворачивать в трей</label><small>Звонки и демонстрация продолжаются, пока Spark находится в трее.</small><button data-action='quit' data-testid='quit-app' class='danger-text'>Выйти из Spark</button></div>",
         option("dark", "Тёмная"),
         option("midnight", "Полночь"),
         option("light", "Светлая"),
@@ -121,11 +138,15 @@ pub fn controls(p: &Preferences) -> String {
         p.zoom,
         p.zoom,
         checked(p.compact),
+        checked(p.noise_suppression),
+        checked(p.share_audio),
         checked(p.sounds),
         p.volume,
         p.volume,
         [
             ("connect", "Подключение"),
+            ("peer-join", "Участник вошёл"),
+            ("peer-leave", "Участник вышел"),
             ("disconnect", "Выход"),
             ("notification", "Сообщение"),
             ("invite", "Приглашение"),
@@ -144,6 +165,29 @@ pub fn controls(p: &Preferences) -> String {
 }
 
 pub fn input(app: &AppRef, field: &str, value: &str, checked: bool) {
+    if field == "pref-noise" {
+        let manager = app.borrow().media.clone();
+        let a = app.clone();
+        spawn_local(async move {
+            if let Some(manager) = manager {
+                if let Err(e) = manager.set_noise_suppression(checked).await {
+                    if let Some(input) = document()
+                        .query_selector("[data-field='pref-noise']")
+                        .ok()
+                        .flatten()
+                        .and_then(|e| e.dyn_into::<HtmlInputElement>().ok())
+                    {
+                        input.set_checked(a.borrow().preferences.noise_suppression);
+                    }
+                    error(&a, format!("Не удалось изменить шумоподавление: {e}"));
+                    return;
+                }
+            }
+            a.borrow_mut().preferences.noise_suppression = checked;
+            persist(&a);
+        });
+        return;
+    }
     {
         let mut s = app.borrow_mut();
         let p = &mut s.preferences;
@@ -161,6 +205,7 @@ pub fn input(app: &AppRef, field: &str, value: &str, checked: bool) {
             "pref-zoom" => p.zoom = value.parse::<u16>().unwrap_or(100).clamp(75, 150),
             "pref-volume" => p.volume = value.parse::<u16>().unwrap_or(55).min(100),
             "pref-sounds" => p.sounds = checked,
+            "pref-share-audio" => p.share_audio = checked,
             "pref-tray" => p.close_to_tray = checked,
             "pref-compact" => p.compact = checked,
             "pref-updates" => p.auto_updates = checked,
@@ -168,6 +213,12 @@ pub fn input(app: &AppRef, field: &str, value: &str, checked: bool) {
         }
         html("zoom-label", &format!("{}%", p.zoom));
         html("volume-label", &format!("{}%", p.volume));
+    }
+    if field == "pref-share-audio" {
+        let s = app.borrow();
+        if let Some(m) = &s.media {
+            m.configure_audio(s.preferences.noise_suppression, s.preferences.share_audio);
+        }
     }
     persist(app);
 }
@@ -188,6 +239,8 @@ pub fn sound(app: &AppRef, name: &str) {
         name,
         "connect"
             | "disconnect"
+            | "peer-join"
+            | "peer-leave"
             | "notification"
             | "invite"
             | "mic-on"
