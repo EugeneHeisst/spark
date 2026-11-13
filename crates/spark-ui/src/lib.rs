@@ -75,6 +75,7 @@ struct App {
     error: Option<String>,
     notice: Option<String>,
     modal: Option<String>,
+    peer_menu: Option<String>,
     expanded_stream: Option<(String, String)>,
     invite: Option<Invite>,
     sources: Vec<Source>,
@@ -258,7 +259,7 @@ fn render(app: &AppRef) {
     if element("workspace").is_none() {
         html(
             "spark",
-            "<div id='workspace' class='workspace'><nav class='rail'><button class='brand-mark small' data-action='about' title='Spark'>ϟ</button><div class='rail-line'></div><div class='space-icon' title='Текущая локальная сеть'>S<span></span></div><div class='rail-bottom'><span class='lan-indicator'></span><span>LAN</span></div></nav><aside id='sidebar' class='sidebar'></aside><section class='main'><header id='chat-header' class='chat-header'></header><section id='voice-panel' class='voice-panel'></section><section id='message-list' class='message-list' aria-live='polite'></section><section id='composer' class='composer-wrap'></section></section><aside id='members' class='members'></aside></div><div id='overlay'></div><input id='file-input' type='file' hidden/>",
+            "<div id='workspace' class='workspace'><nav class='rail'><button class='brand-mark small' data-action='about' title='Spark'>ϟ</button><div class='rail-line'></div><div class='space-icon' title='Текущая локальная сеть'>S<span></span></div><div class='rail-bottom'><span class='lan-indicator'></span><span>LAN</span></div></nav><aside id='sidebar' class='sidebar'></aside><section class='main'><header id='chat-header' class='chat-header'></header><section id='voice-panel' class='voice-panel'></section><section id='message-list' class='message-list' aria-live='polite'></section><section id='composer' class='composer-wrap'></section></section><aside id='members' class='members'></aside></div><div id='overlay'></div><div id='peer-context'></div><input id='file-input' type='file' hidden/>",
         );
     }
     render_sidebar(app);
@@ -489,6 +490,15 @@ fn render_composer(app: &AppRef) {
     }
 }
 fn render_members(app: &AppRef) {
+    let missing_peer = {
+        let s = app.borrow();
+        s.peer_menu
+            .as_ref()
+            .is_some_and(|id| !s.peers.iter().any(|p| &p.id == id))
+    };
+    if missing_peer {
+        close_peer_menu(app);
+    }
     let s = app.borrow();
     let mut out = format!(
         "<div class='members-heading'>В СЕТИ <span>{}</span></div>",
@@ -496,7 +506,7 @@ fn render_members(app: &AppRef) {
     );
     for p in &s.peers {
         let mine = s.profile.as_ref().is_some_and(|x| x.id == p.id);
-        out.push_str(&format!("<div class='member'><span class='avatar {}'>{}<i></i></span><div><strong>{}{}</strong><small>{}</small></div>{}</div>",if mine {"self"} else {""},initial(&p.name),esc(&p.name),if mine {" <em>вы</em>"} else {""},if p.screen {"Демонстрирует экран"} else if p.camera {"Камера включена"} else if p.voice_channel.is_some() {"В голосовом канале"} else {"В сети"},if mine {String::new()} else {format!("<button data-action='invite' data-id='{}' title='Пригласить в звонок' data-testid='invite-{}'>◖</button>",esc(&p.id),esc(&p.id))}));
+        out.push_str(&format!("<div class='member' data-context-peer='{}'><span class='avatar {}'>{}<i></i></span><div><strong>{}{}</strong><small>{}</small></div>{}</div>",esc(&p.id),if mine {"self"} else {""},initial(&p.name),esc(&p.name),if mine {" <em>вы</em>"} else {""},if p.screen {"Демонстрирует экран"} else if p.camera {"Камера включена"} else if p.voice_channel.is_some() {"В голосовом канале"} else {"В сети"},if mine {String::new()} else {format!("<button data-action='invite' data-id='{}' title='Пригласить в звонок' data-testid='invite-{}'>◖</button>",esc(&p.id),esc(&p.id))}));
     }
     out.push_str("<div class='members-note'><span>⌁</span><strong>Вместе в одной сети</strong><p>Для общения интернет<br/>не требуется.</p></div>");
     drop(s);
@@ -529,26 +539,54 @@ fn render_speaking(app: &AppRef) {
     }
 }
 
-fn render_mixer(app: &AppRef) {
+fn close_peer_menu(app: &AppRef) {
+    app.borrow_mut().peer_menu = None;
+    html("peer-context", "");
+}
+fn open_peer_menu(app: &AppRef, peer_id: &str, x: i32, y: i32) {
     let s = app.borrow();
-    let mut out = String::new();
-    for peer in s.peers.iter().filter(|p| {
-        p.voice_channel == s.media_state.channel_id
-            && !s.profile.as_ref().is_some_and(|me| me.id == p.id)
-    }) {
-        out.push_str(&format!(
-            "<div class='peer-mixer' data-speaker='{}'><strong>{}</strong>",
-            esc(&peer.id),
-            esc(&peer.name)
-        ));
-        for (kind, label) in [("audio", "Голос"), ("screen-audio", "Стрим")] {
-            let volume = s.preferences.peer_volume(&peer.id, kind);
-            out.push_str(&format!("<label>{label}<input type='range' min='0' max='100' step='1' value='{volume}' aria-label='{label}: {}' data-volume-peer='{}' data-volume-kind='{kind}' data-testid='volume-{}-{kind}'/><output id='volume-{}-{kind}'>{volume}%</output></label>", esc(&peer.name), esc(&peer.id), esc(&peer.id), esc(&peer.id)));
-        }
-        out.push_str("</div>");
+    let Some(peer) = s
+        .peers
+        .iter()
+        .find(|p| p.id == peer_id && !s.profile.as_ref().is_some_and(|me| me.id == p.id))
+    else {
+        return;
+    };
+    let mut out = format!(
+        "<section class='peer-context peer-mixer' id='peer-menu' role='dialog' aria-label='Громкость участника' data-testid='peer-volume-menu' data-speaker='{}'><strong>{}</strong><small>Громкость для вас</small>",
+        esc(&peer.id),
+        esc(&peer.name)
+    );
+    for (kind, label) in [("audio", "Голос"), ("screen-audio", "Стрим")] {
+        let volume = s.preferences.peer_volume(&peer.id, kind);
+        out.push_str(&format!("<label>{label}<input type='range' min='0' max='100' step='1' value='{volume}' aria-label='{label}: {}' data-volume-peer='{}' data-volume-kind='{kind}' data-testid='volume-{}-{kind}'/><output id='volume-{}-{kind}'>{volume}%</output></label>", esc(&peer.name), esc(&peer.id), esc(&peer.id), esc(&peer.id)));
     }
+    out.push_str("</section>");
     drop(s);
-    html("call-mixer", &out);
+    app.borrow_mut().peer_menu = Some(peer_id.into());
+    html("peer-context", &out);
+    if let Some(menu) = element("peer-menu").and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let width = window()
+            .inner_width()
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1000.) as i32;
+        let height = window()
+            .inner_height()
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(700.) as i32;
+        let left = x.clamp(8, (width - menu.offset_width() - 8).max(8));
+        let top = y.clamp(8, (height - menu.offset_height() - 8).max(8));
+        let _ = menu.set_attribute("style", &format!("left:{left}px;top:{top}px"));
+    }
+    if let Ok(Some(input)) = document().query_selector("#peer-menu input") {
+        if let Ok(input) = input.dyn_into::<web_sys::HtmlElement>() {
+            let _ = input.focus();
+        }
+    }
+    render_speaking(app);
 }
 
 fn render_voice(app: &AppRef) {
@@ -570,7 +608,7 @@ fn render_voice(app: &AppRef) {
     if element("call-grid").is_none() {
         html(
             "voice-panel",
-            "<div id='call-heading' class='voice-heading'></div><div id='call-grid' class='video-grid'></div><div id='call-audio'></div><div id='call-mixer' class='call-mixer'></div><div id='call-controls' class='call-controls'></div>",
+            "<div id='call-heading' class='voice-heading'></div><div id='call-grid' class='video-grid'></div><div id='call-audio'></div><div id='call-controls' class='call-controls'></div>",
         );
     }
     let name = channels
@@ -616,7 +654,7 @@ fn render_voice(app: &AppRef) {
             }
         ),
     );
-    render_mixer(app);
+
     // Media elements survive state/presence updates. Reassigning srcObject restarts
     // playback in Chromium, so reconcile by peer/kind and replace only changed streams.
     if let Ok(nodes) = document().query_selector_all("[data-stream-key]") {
@@ -828,6 +866,53 @@ fn render_overlay(app: &AppRef) {
 fn install_events(app: &AppRef) {
     let root = element("spark").expect("root");
     let a = app.clone();
+    let context = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
+        let Some(target) = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+        else {
+            return;
+        };
+        if target.closest("#peer-menu").ok().flatten().is_some() {
+            ev.prevent_default();
+            return;
+        }
+        close_peer_menu(&a);
+        if let Ok(Some(peer)) = target.closest("[data-context-peer], [data-speaker]") {
+            let id = peer
+                .get_attribute("data-context-peer")
+                .or_else(|| peer.get_attribute("data-speaker"))
+                .unwrap_or_default();
+            ev.prevent_default();
+            open_peer_menu(&a, &id, ev.client_x(), ev.client_y());
+        }
+    });
+    root.add_event_listener_with_callback("contextmenu", context.as_ref().unchecked_ref())
+        .expect("context menu");
+    context.forget();
+    let a = app.clone();
+    let outside = Closure::<dyn FnMut(Event)>::new(move |ev: Event| {
+        if ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .is_some_and(|el| el.closest("#peer-menu").ok().flatten().is_none())
+        {
+            close_peer_menu(&a);
+        }
+    });
+    document()
+        .add_event_listener_with_callback("pointerdown", outside.as_ref().unchecked_ref())
+        .expect("dismiss menu");
+    outside.forget();
+    let a = app.clone();
+    let dismiss = Closure::<dyn FnMut(Event)>::new(move |_| close_peer_menu(&a));
+    for event in ["resize", "blur"] {
+        window()
+            .add_event_listener_with_callback(event, dismiss.as_ref().unchecked_ref())
+            .expect("dismiss menu");
+    }
+    dismiss.forget();
+    let a = app.clone();
     let click = Closure::<dyn FnMut(Event)>::new(move |ev: Event| {
         let Some(target) = ev
             .target()
@@ -952,6 +1037,11 @@ fn install_events(app: &AppRef) {
                 }
             }
             if ev.key() == "Escape" {
+                if a.borrow().peer_menu.is_some() {
+                    close_peer_menu(&a);
+                    ev.prevent_default();
+                    return;
+                }
                 if document().fullscreen_element().is_some() {
                     document().exit_fullscreen();
                 }
