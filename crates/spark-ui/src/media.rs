@@ -298,7 +298,8 @@ impl MediaManager {
         }
         let epoch = self.inner.epoch.get();
         let result = self.toggle_screen_inner(epoch).await;
-        if result.is_err() {
+        // A cancelled capture from an old call must not stop a newer call's source.
+        if result.is_err() && self.inner.epoch.get() == epoch {
             stop_share_audio();
         }
         if self.inner.epoch.get() == epoch {
