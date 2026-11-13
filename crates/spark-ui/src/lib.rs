@@ -588,7 +588,7 @@ fn render_voice(app: &AppRef) {
     html(
         "call-controls",
         &format!(
-            "<button class='{}' data-action='mute' title='Микрофон' data-testid='mute'><span>{}</span><small>{}</small></button><button class='{}' data-action='deafen' title='Звук' data-testid='deafen'><span>♬</span><small>{}</small></button><button class='{}' data-action='camera' title='Камера' data-testid='camera'><span>▣</span><small>Камера</small></button><button class='{}' data-action='screen' title='Демонстрация экрана' data-testid='screen'><span>▱</span><small>Экран</small></button><button class='end-call' data-action='leave-voice' title='Завершить звонок' data-testid='leave-voice'><span>⌁</span><small>Выйти</small></button>",
+            "<button class='{}' data-action='mute' title='Микрофон' data-testid='mute'><span>{}</span><small>{}</small></button><button class='{}' data-action='deafen' title='Звук' data-testid='deafen'><span>♬</span><small>{}</small></button><button class='{}' data-action='camera' title='Камера' data-testid='camera'><span>▣</span><small>Камера</small></button><button class='{}' data-action='screen' title='Демонстрация экрана' data-testid='screen'><span>▱</span><small>Экран</small></button><button class='{}' data-action='toggle-noise' title='Шумоподавление микрофона' data-testid='noise-suppression'><span>≈</span><small>Шумодав {}</small></button><button class='end-call' data-action='leave-voice' title='Завершить звонок' data-testid='leave-voice'><span>⌁</span><small>Выйти</small></button>",
             if media_state.muted { "off" } else { "" },
             if media_state.muted { "♩̸" } else { "♩" },
             if media_state.muted {
@@ -603,7 +603,17 @@ fn render_voice(app: &AppRef) {
                 "Звук"
             },
             if media_state.camera { "on" } else { "" },
-            if media_state.screen { "on" } else { "" }
+            if media_state.screen { "on" } else { "" },
+            if app.borrow().preferences.noise_suppression {
+                "on"
+            } else {
+                ""
+            },
+            if app.borrow().preferences.noise_suppression {
+                "вкл."
+            } else {
+                "выкл."
+            }
         ),
     );
     render_mixer(app);
@@ -790,7 +800,7 @@ fn render_overlay(app: &AppRef) {
             }).unwrap_or_default(),
             "channel"=>format!("<span class='eyebrow'>ВАШЕ ПРОСТРАНСТВО</span><h2>Создать канал</h2><label class='field'>Название<input id='channel-name' data-field='channel-name' data-testid='channel-name' maxlength='64' value='{}' placeholder='Например: идеи'/></label><label class='field'>Тип канала<select data-field='channel-kind' data-testid='channel-kind'><option value='text' {}>Текстовый</option><option value='voice' {}>Голосовой</option></select></label><div class='modal-actions'><button data-action='close-modal'>Отмена</button><button class='primary' data-action='create-channel' data-testid='create-channel'>Создать</button></div>",esc(&s.form.channel_name),if s.form.channel_kind=="text" {"selected"} else {""},if s.form.channel_kind=="voice" {"selected"} else {""}),
             "settings"=>format!("<span class='eyebrow'>SPARK · {}</span><h2>Настройки</h2><label class='field'>Ваше имя<input data-field='settings-name' data-testid='settings-name' maxlength='64' value='{}'/></label>{}<div class='settings-info'><strong>Локальная комната</strong><p>{}</p><code>{}</code><small>{}</small></div><div class='modal-actions'>{}<button class='primary' data-action='save-settings' data-testid='save-settings'>Сохранить имя</button></div>",esc(&s.version),esc(&s.form.settings_name),format!("{}{}",preferences::controls(&s.preferences),update_controls),s.conn.as_ref().map(|c|esc(&c.server_name)).unwrap_or_else(||"Нет подключения".into()),s.conn.as_ref().map(|c|esc(&c.address)).unwrap_or_default(),if s.conn.as_ref().is_some_and(|c|c.hosting) {"Вы — создатель. При выходе комната остановится для всех."} else {"Настройки оформления действуют на этом компьютере."},if s.conn.is_some(){format!("<button class='danger-text' data-action='disconnect' data-testid='disconnect'>{}</button>",if s.conn.as_ref().is_some_and(|c|c.hosting){"Остановить комнату"}else{"Выйти из комнаты"})}else{String::new()}),
-            "sources"=>{let mut x=format!("<span class='eyebrow'>ДЕМОНСТРАЦИЯ ЭКРАНА</span><h2>Что показать команде?</h2><p>Выберите экран или отдельное окно.</p><label class='check-field'><input type='checkbox' data-field='pref-share-audio' data-testid='pref-share-audio' {} />Передавать системный звук</label><p>Передаётся звук всего компьютера. На Linux в него входят и голоса Spark: отключите звук звонка, чтобы собеседники не слышали себя.</p><div class='sources'>",if s.preferences.share_audio {"checked"} else {""});for src in &s.sources { x.push_str(&format!("<button class='source' data-action='select-source' data-id='{}' data-testid='source-{}'><img src='{}' alt=''/><strong>{}</strong></button>",esc(&src.id),esc(&src.id),esc(&src.thumbnail),esc(&src.name))); }x.push_str("</div><div class='modal-actions'><button data-action='close-modal'>Отмена</button></div>");x},
+            "sources"=>{let mut x=format!("<span class='eyebrow'>ДЕМОНСТРАЦИЯ ЭКРАНА</span><h2>Что показать команде?</h2><p>Выберите экран или отдельное окно.</p><label class='check-field'><input type='checkbox' data-field='pref-share-audio' data-testid='pref-share-audio' {} />Передавать системный звук</label><p>Передаётся звук других приложений. Звук Spark исключается из демонстрации.</p><div class='sources'>",if s.preferences.share_audio {"checked"} else {""});for src in &s.sources { x.push_str(&format!("<button class='source' data-action='select-source' data-id='{}' data-testid='source-{}'><img src='{}' alt=''/><strong>{}</strong></button>",esc(&src.id),esc(&src.id),esc(&src.thumbnail),esc(&src.name))); }x.push_str("</div><div class='modal-actions'><button data-action='close-modal'>Отмена</button></div>");x},
             _=>"<div class='brand-mark'>ϟ</div><h2>Spark</h2><p>Общение рядом. Чаты, голос, видео и файлы в вашей локальной сети.</p><div class='modal-actions'><button class='primary' data-action='close-modal'>Понятно</button></div>".into()
         };
         out.push_str(&format!("<div class='modal-shade'><section class='modal {}'><button class='modal-close' data-action='close-modal' data-testid='{}' title='Закрыть'>×</button>{content}</section></div>",if modal=="viewer"{"video-viewer"}else if modal=="settings"{"settings-modal"}else{""},if modal=="viewer"{"close-video"}else{"close-modal"}));
@@ -1093,6 +1103,10 @@ fn action_handler(app: &AppRef, action: &str, id: &str, name: &str) {
             }
         }
         "download" => download(app, id.to_owned(), name.to_owned()),
+        "toggle-noise" => {
+            let enabled = !app.borrow().preferences.noise_suppression;
+            preferences::input(app, "pref-noise", "", enabled);
+        }
         "settings" => {
             let mut s = app.borrow_mut();
             s.form.settings_name = s

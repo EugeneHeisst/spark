@@ -22,7 +22,7 @@ web-sys = { version = "0.3", features = [
   "KeyboardEvent", "MessageEvent", "CloseEvent", "ErrorEvent", "MouseEvent", "Location",
   "Request", "RequestInit", "RequestMode", "Response", "Headers", "WebSocket", "BinaryType",
   "File", "FileList", "Blob", "XmlHttpRequest", "XmlHttpRequestUpload", "XmlHttpRequestEventTarget",
-  "ProgressEvent", "DomTokenList", "Storage", "Navigator", "MediaDevices", "MediaStream", "MediaStreamTrack",
+  "ProgressEvent", "DomTokenList", "Storage", "Navigator", "MediaDevices", "MediaDeviceInfo", "MediaStream", "MediaStreamTrack",
   "MediaStreamConstraints", "DisplayMediaStreamConstraints", "RtcPeerConnection", "RtcConfiguration",
   "RtcIceCandidate", "RtcIceCandidateInit", "RtcPeerConnectionIceEvent", "RtcSdpType",
   "RtcSessionDescriptionInit", "RtcSignalingState", "RtcPeerConnectionState", "RtcIceConnectionState",

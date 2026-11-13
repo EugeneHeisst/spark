@@ -54,6 +54,8 @@ try {
   const loaded = spawnSync('pactl', ['load-module', 'module-null-sink', 'sink_name=spark_test', 'channels=2'], { env, encoding: 'utf8' });
   if (loaded.status !== 0) throw new Error(loaded.stderr);
   if (spawnSync('pactl', ['set-default-sink', 'spark_test'], { env }).status !== 0) throw new Error('Cannot select test sink');
+  const mic = spawnSync('pactl', ['load-module', 'module-remap-source', 'master=spark_test.monitor', 'source_name=spark_test_mic', 'source_properties=device.description=Spark_Test_Mic'], { env, encoding: 'utf8' });
+  if (mic.status !== 0) throw new Error(mic.stderr);
   process.exitCode = await run(process.execPath, ['scripts/test-linux.mjs', '--grep', 'isolated system loopback', '--output', 'artifacts/loopback', '--reporter', 'list']);
 } finally {
   for (const child of children.reverse()) {

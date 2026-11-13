@@ -150,6 +150,7 @@ impl MediaManager {
     }
 
     pub fn leave(&self) {
+        stop_share_audio();
         self.inner.epoch.set(self.inner.epoch.get().wrapping_add(1));
         let ids: Vec<_> = self.inner.peers.borrow().keys().cloned().collect();
         for id in ids {
@@ -297,6 +298,9 @@ impl MediaManager {
         }
         let epoch = self.inner.epoch.get();
         let result = self.toggle_screen_inner(epoch).await;
+        if result.is_err() {
+            stop_share_audio();
+        }
         if self.inner.epoch.get() == epoch {
             self.inner.screen_busy.set(false);
         }
@@ -316,7 +320,14 @@ impl MediaManager {
         for key in ["echoCancellation", "noiseSuppression", "autoGainControl"] {
             let _ = Reflect::set(&audio, &key.into(), &JsValue::FALSE);
         }
-        if self.inner.share_audio.get() {
+        let source_label = if self.inner.share_audio.get() && super::desktop().is_some() {
+            super::desktop_call("prepareShareAudio", &[])
+                .await?
+                .as_string()
+        } else {
+            None
+        };
+        if self.inner.share_audio.get() && source_label.is_none() {
             constraints.set_audio(audio.as_ref());
         } else {
             constraints.set_audio(&JsValue::FALSE);
@@ -329,6 +340,20 @@ impl MediaManager {
             .map_err(|e| format!("Демонстрация не начата: {}", js_error(e)))?
             .dyn_into()
             .map_err(|_| "Браузер не вернул поток экрана")?;
+        if let Some(label) = source_label {
+            let captured = capture_share_audio(&label).await;
+            match captured {
+                Ok(audio) => {
+                    for track in tracks(&audio) {
+                        stream.add_track(&track);
+                    }
+                }
+                Err(error) => {
+                    stop_stream(&stream);
+                    return Err(error);
+                }
+            }
+        }
         if self.inner.epoch.get() != epoch {
             stop_stream(&stream);
             return Err("Вызов уже завершён".into());
@@ -1049,6 +1074,7 @@ impl MediaManager {
         self.stop_video(false).await
     }
     async fn stop_screen(&self) -> Result<(), String> {
+        stop_share_audio();
         self.stop_video(true).await
     }
     async fn stop_video(&self, screen: bool) -> Result<(), String> {
@@ -1278,4 +1304,43 @@ fn restart_ice(pc: &RtcPeerConnection) -> Result<(), String> {
         .map_err(|_| "Браузер не поддерживает восстановление ICE".to_string())?;
     method.call0(pc.as_ref()).map_err(js_error)?;
     Ok(())
+}
+
+fn stop_share_audio() {
+    if super::desktop().is_some() {
+        spawn_local(async {
+            let _ = super::desktop_call("stopShareAudio", &[]).await;
+        });
+    }
+}
+async fn capture_share_audio(label: &str) -> Result<MediaStream, String> {
+    let devices = devices()?;
+    let list = JsFuture::from(devices.enumerate_devices().map_err(js_error)?)
+        .await
+        .map_err(js_error)?;
+    let id = Array::from(&list)
+        .iter()
+        .filter_map(|d| d.dyn_into::<web_sys::MediaDeviceInfo>().ok())
+        .find(|d| d.label() == label)
+        .map(|d| d.device_id())
+        .ok_or("Источник звука демонстрации не найден")?;
+    let audio = Object::new();
+    let exact = Object::new();
+    Reflect::set(&exact, &"exact".into(), &id.into()).map_err(js_error)?;
+    Reflect::set(&audio, &"deviceId".into(), &exact).map_err(js_error)?;
+    for key in ["echoCancellation", "noiseSuppression", "autoGainControl"] {
+        Reflect::set(&audio, &key.into(), &JsValue::FALSE).map_err(js_error)?;
+    }
+    let constraints = MediaStreamConstraints::new();
+    constraints.set_audio(&audio);
+    constraints.set_video(&JsValue::FALSE);
+    JsFuture::from(
+        devices
+            .get_user_media_with_constraints(&constraints)
+            .map_err(js_error)?,
+    )
+    .await
+    .map_err(js_error)?
+    .dyn_into()
+    .map_err(|_| "Не удалось получить звук демонстрации".into())
 }

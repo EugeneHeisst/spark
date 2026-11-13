@@ -1870,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "spark-protocol"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1878,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "spark-service"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1903,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "spark-ui"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",

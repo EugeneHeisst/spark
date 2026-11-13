@@ -4,6 +4,9 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createUpdater } = require('./updater.cjs');
+const { createShareAudio, appId } = require('./share-audio.cjs');
+const shareAudio = createShareAudio();
+if (process.platform === 'linux') process.env.PULSE_PROP = (process.env.PULSE_PROP || '') + ' application.id=' + appId;
 
 app.setName('Spark');
 app.setAppUserModelId('dev.eugeneheisst.spark');
@@ -185,6 +188,8 @@ function installPermissions() {
 }
 
 function installIpc() {
+  ipcMain.handle('spark:prepare-share-audio', event => { trustedIpc(event); if (!preferences.share_audio) throw new Error('Сначала включите передачу звука'); return process.platform === 'linux' && !testing ? shareAudio.start() : null; });
+  ipcMain.handle('spark:stop-share-audio', event => { trustedIpc(event); shareAudio.stop(); });
   ipcMain.handle('spark:update-status', event => { trustedIpc(event); return updater.status(); });
   ipcMain.handle('spark:check-updates', event => { trustedIpc(event); return updater.check(); });
   ipcMain.handle('spark:activity', (event, input) => { trustedIpc(event); activity = normalizeActivity(input); });
@@ -309,7 +314,9 @@ else {
       mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       mainWindow.webContents.on('will-navigate', (event, url) => { if (!trustedUrl(url)) event.preventDefault(); });
       mainWindow.once('ready-to-show', () => mainWindow.show());
-      mainWindow.webContents.on('destroyed', () => { sourcesByContents.clear(); approvedSources.clear(); });
+      mainWindow.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) shareAudio.stop(); });
+      mainWindow.webContents.on('render-process-gone', () => shareAudio.stop());
+      mainWindow.webContents.on('destroyed', () => { shareAudio.stop(); sourcesByContents.clear(); approvedSources.clear(); });
       await mainWindow.loadURL(boot.url);
     } catch (error) {
       dialog.showErrorBox('Не удалось запустить Spark', error.message);
@@ -320,6 +327,7 @@ else {
 app.on('activate', showWindow);
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', () => {
+  shareAudio.stop();
   quitting = true;
   updater?.stop();
   tray?.destroy();
@@ -328,3 +336,5 @@ app.on('before-quit', () => {
 });
 process.on('SIGTERM', () => app.quit());
 process.on('SIGINT', () => app.quit());
+
+app.on('will-quit', () => shareAudio.stop());
